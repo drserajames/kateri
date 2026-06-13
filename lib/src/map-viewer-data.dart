@@ -211,7 +211,7 @@ class AntigenicMapViewerData {
       final stopwatch = Stopwatch()..start();
       final bytes = await _callbacks.exportPdf(canvasPdfWidth: width); // antigenicMapPainter.viewer.exportPdf();
       if (bytes != null) {
-        final generatedFilename = await FileSaver.instance.saveFile(filename ?? chart!.info.nameForFilename(), bytes, "pdf", mimeType: MimeType.PDF);
+        final generatedFilename = await FileSaver.instance.saveFile(name: filename ?? chart!.info.nameForFilename(), bytes: bytes, ext: "pdf", mimeType: MimeType.pdf);
         debug("generatedFilename $generatedFilename");
         if ((open ?? openExportedPdf) && UniversalPlatform.isMacOS) {
           await Process.run("open", [generatedFilename]);

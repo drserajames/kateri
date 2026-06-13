@@ -29,7 +29,7 @@ abstract class PlotSpec {
 
 // ----------------------------------------------------------------------
 
-class _DefaultDrawingOrder {
+mixin _DefaultDrawingOrder {
   makeDefaultDrawingOrder(Chart chart, Projection projection) {
     bool hasCoord(int pointNo) => projection.layout[pointNo] != null;
     ddoSera = Iterable<int>.generate(chart.sera.length, (srNo) => srNo + chart.antigens.length).where(hasCoord).toList();
@@ -63,7 +63,7 @@ class _DefaultDrawingOrder {
 
 // ----------------------------------------------------------------------
 
-abstract class _DefaultPointSpecs {
+mixin _DefaultPointSpecs {
   void initDefaultPointSpecs({required ColorAndModifier testAntigenFill, required ColorAndModifier outline}) {
     referenceCell = PointPlotSpec.referenceCell(outline);
     referenceEgg = PointPlotSpec.referenceEgg(outline);

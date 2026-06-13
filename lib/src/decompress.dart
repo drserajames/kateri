@@ -48,11 +48,11 @@ Future<List<int>> decompressFile(String path) async {
       case Encoder.plain:
         return File(path).readAsBytes();
       case Encoder.xz:
-        return aio.XZDecoder().decodeBuffer(aio.InputFileStream(path));
+        return aio.XZDecoder().decodeBytes(await File(path).readAsBytes());
       case Encoder.bz2:
-        return aio.BZip2Decoder().decodeBuffer(aio.InputFileStream(path));
+        return aio.BZip2Decoder().decodeBytes(await File(path).readAsBytes());
       case Encoder.gzip:
-        return aio.GZipDecoder().decodeBuffer(aio.InputFileStream(path));
+        return aio.GZipDecoder().decodeBytes(await File(path).readAsBytes());
       case Encoder.brotli:
         return brotliDecode(await File(path).readAsBytes());
     }
