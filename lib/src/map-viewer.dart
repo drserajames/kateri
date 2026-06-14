@@ -417,8 +417,11 @@ class _MenuSectionColumnWidgetState extends State<MenuSectionColumnWidget> {
           SingleChildScrollView(
             child: ExpansionPanelList(
               expansionCallback: (int index, bool isExpanded) {
+                // Flutter's ExpansionPanelList passes the *new* desired expansion state here (it already negates
+                // the current state internally), so use isExpanded directly — negating it again would make the
+                // panels never toggle.
                 setState(() {
-                  _sections[index].expand(!isExpanded);
+                  _sections[index].expand(isExpanded);
                 });
               },
               children: _sections.map<ExpansionPanel>((_MenuSection section) => section.build()).toList(),
