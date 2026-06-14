@@ -176,6 +176,16 @@ class CommandEvent extends Event {
         }
         handler.endProcessing();
         break;
+      case "get_moved_points": // send the list of point indexes the user dragged back to server
+        handler.startProcessing();
+        final movedResult = <String, dynamic>{
+          "C": data["C"],
+          "_id": data["_id"],
+          "moved": antigenicMapViewerData.movedPoints.toList()..sort(),
+        };
+        send(socket, "JSON", utf8.encoder.convert(jsonEncode(movedResult)));
+        handler.endProcessing();
+        break;
       case "get_viewport": // send viewport data (json) back to server
         handler.startProcessing();
         final result = <String, dynamic>{

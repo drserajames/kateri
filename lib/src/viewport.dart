@@ -63,8 +63,10 @@ class Viewport {
   //   _aabb.setCenterAndHalfExtents(Vector3.all(0.0), (_aabb.max - _aabb.min) / 2);
   // }
 
-  /// extend viewport so it's corners are at the whole number vectors, then re-center layout within this viewport
-  void roundAndRecenter(Layout layout, int numberOfDimensions) {
+  /// extend viewport so it's corners are at the whole number vectors, then re-center layout within this viewport.
+  /// Returns the adjustment vector that was added to every layout point (needed to invert the recentering when
+  /// converting a viewport/transformed coordinate back to a raw layout coordinate, e.g. for interactive point moves).
+  Vector3 roundAndRecenter(Layout layout, int numberOfDimensions) {
     final roundedSize = (_aabb.max - _aabb.min + Vector3.all(1.0))..ceil();
     final roundedHalfSize = roundedSize / 2;
     final roundedHalfSizeCeiled = Vector3.copy(roundedSize)..ceil();
@@ -92,6 +94,7 @@ class Viewport {
     //   }
     // }
     // print("Viewport.roundAndRecenter ${toString()}");
+    return adjust;
   }
 
   static bool notNull(Vector3? elt) => elt != null;

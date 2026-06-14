@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:universal_platform/universal_platform.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:file_saver/file_saver.dart';
+import 'package:vector_math/vector_math_64.dart' show Vector3;
 
 import 'error.dart';
 import 'decompress.dart';
@@ -39,17 +40,37 @@ class AntigenicMapViewerData {
   int currentPlotSpecIndex = -1;
   // final aaPerPos = <int, Map<String, int>>{};
 
+  /// Point (layout) indexes the user has dragged this session. Reported to the server (get_moved_points) so it
+  /// can pin them (Projection.set_unmovable) before relaxing. Antigens come first (0..nAg-1), then sera.
+  final Set<int> movedPoints = <int>{};
+
   AntigenicMapViewerData(this._callbacks);
 
   void setChart(Chart aChart) {
     chart = aChart;
     projection = chart!.projections[0];
     plotSpecs = chart!.plotSpecs(projection);
+    movedPoints.clear();
     _chartBeingLoaded = false;
     _callbacks.hideMessage();
     currentPlotSpecIndex = -1;
     _callbacks.updateCallback(plotSpecIndex: 0);
     // makeAaPerPos();
+  }
+
+  /// Move antigen/serum point [pointNo] to [newTransformedPos] (transformed/viewport coordinates) and record it
+  /// as moved. The underlying chart json is updated so exportToJson() / get_chart return the new coordinates.
+  void movePoint(int pointNo, Vector3 newTransformedPos) {
+    if (projection != null) {
+      projection!.moveTransformedPoint(pointNo, newTransformedPos);
+      movedPoints.add(pointNo);
+    }
+  }
+
+  /// Undo all point moves, restoring original coordinates.
+  void resetMovedPoints() {
+    projection?.resetMovedPoints();
+    movedPoints.clear();
   }
 
   void setChartFromBytes(Uint8List bytes) {
@@ -60,6 +81,7 @@ class AntigenicMapViewerData {
     chart = null;
     projection = null;
     viewport = null;
+    movedPoints.clear();
     _chartBeingLoaded = false;
     currentPlotSpecIndex = -1;
     _callbacks.updateCallback();

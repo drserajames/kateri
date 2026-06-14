@@ -1,0 +1,97 @@
+#! /usr/bin/env python3
+# Standalone harness to verify interactive point dragging in kateri.
+#
+# Starts a unix-socket server, launches kateri, sends a synthetic (non-real) chart, then polls a control file
+# for commands to forward (get_chart / get_moved_points / quit) and writes responses to stdout. This lets an
+# operator drag points in the GUI between command issuances.
+#
+#   ./drag-test /tmp/k.sock /tmp/k.cmd
+#   # then: echo get_moved_points > /tmp/k.cmd ; echo get_chart > /tmp/k.cmd ; echo quit > /tmp/k.cmd
+
+import sys, os, json, asyncio, subprocess
+from pathlib import Path
+
+KATERI_EXE = Path(__file__).parent.joinpath("../build/macos/Build/Products/Release/kateri.app/Contents/MacOS/kateri").resolve()
+CHART = Path(__file__).parent.joinpath("drag-test-chart.json")
+
+command_id = 0
+writer_g = None
+
+def send(data_code: bytes, data: bytes):
+    writer_g.write(data_code)
+    writer_g.write(len(data).to_bytes(4, byteorder=sys.byteorder))
+    writer_g.write(data)
+    if last := len(data) % 4:
+        writer_g.write(b"\x00" * (4 - last))
+
+def send_command(cmd: dict):
+    global command_id
+    command_id += 1
+    send(b"COMD", json.dumps({**cmd, "_id": command_id}).encode("utf-8"))
+
+async def read_payload(reader):
+    payload_length = int.from_bytes(await reader.read(4), byteorder=sys.byteorder)
+    data = b""
+    while len(data) < payload_length:
+        data += await reader.read(payload_length - len(data))
+    if (pad := 4 - payload_length % 4) != 4:
+        await reader.read(pad)
+    return data
+
+async def connected(reader, writer):
+    global writer_g
+    writer_g = writer
+    cmd_file = Path(sys.argv[2])
+    print(">>> connected", file=sys.stderr, flush=True)
+    while (request := (await reader.read(4)).decode("utf8").strip()) not in ["", "QUIT"]:
+        if request == "HELO":
+            print(f">>> HELO; sending chart {CHART}", file=sys.stderr, flush=True)
+            send(b"CHRT", CHART.read_bytes())
+            await writer.drain()
+            asyncio.create_task(poll_commands(cmd_file, writer))
+        elif request in ["CHRT", "JSON", "PDFB"]:
+            data = await read_payload(reader)
+            if request == "CHRT":
+                chart = json.loads(data)
+                layout = chart["c"]["P"][0]["l"]
+                print(f"<<< CHRT ({len(data)} bytes) layout:", flush=True)
+                for i, p in enumerate(layout):
+                    print(f"      [{i}] {p}", flush=True)
+            elif request == "JSON":
+                print(f"<<< JSON {json.loads(data)}", flush=True)
+            else:
+                print(f"<<< PDFB {len(data)} bytes", flush=True)
+        await writer.drain()
+    print(">>> kateri quit", file=sys.stderr, flush=True)
+    writer.close()
+    asyncio.get_event_loop().stop()
+
+async def poll_commands(cmd_file: Path, writer):
+    if cmd_file.exists():
+        cmd_file.unlink()
+    while True:
+        await asyncio.sleep(0.2)
+        if cmd_file.exists():
+            cmd = cmd_file.read_text().strip()
+            cmd_file.unlink()
+            print(f">>> command: {cmd}", file=sys.stderr, flush=True)
+            payload = {"C": cmd}
+            if cmd == "pdf":
+                payload["width"] = 800.0
+            send_command(payload)
+            await writer.drain()
+
+async def main():
+    sock = sys.argv[1]
+    if os.path.exists(sock):
+        os.unlink(sock)
+    server = await asyncio.start_unix_server(connected, sock)
+    print(f">>> server on {sock}", file=sys.stderr, flush=True)
+    kateri = await asyncio.create_subprocess_exec(str(KATERI_EXE), "--socket", sock)
+    async with server:
+        await server.serve_forever()
+
+try:
+    asyncio.run(main())
+except (KeyboardInterrupt, RuntimeError):
+    pass

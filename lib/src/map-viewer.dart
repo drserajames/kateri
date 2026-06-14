@@ -247,7 +247,10 @@ class MouseInteractionWidget extends StatefulWidget {
 
 class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
   static final _lockKeys = Set<LogicalKeyboardKey>.unmodifiable(<LogicalKeyboardKey>[LogicalKeyboardKey.alt, LogicalKeyboardKey.altLeft, LogicalKeyboardKey.altRight]);
+  // Holding shift while dragging moves the nearest antigen/serum point, regardless of the menu "Move points" toggle.
+  static final _movePointKeys = Set<LogicalKeyboardKey>.unmodifiable(<LogicalKeyboardKey>[LogicalKeyboardKey.shift, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.shiftRight]);
   RegionVertexRef? _draggedVertex;
+  int? _draggedPoint; // antigen/serum point being dragged (move-points mode), null if none
   SystemMouseCursor cursor = SystemMouseCursors.basic;
 
   @override
@@ -297,6 +300,8 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
       final regionPathVertices = widget.antigenicMapPainter.viewer.regions.verticesByCoordinates(mousePos);
       if (regionPathVertices.isNotEmpty) {
         _mouseCursorDraggingRegionVertexPossible();
+      } else if ((widget.antigenicMapPainter.viewer.movePointsMode || _movePointModifierHeld()) && newlyHoveredPoints.isNotEmpty) {
+        _mouseCursorDraggingRegionVertexPossible();
       } else {
         _mouseCursorReset();
       }
@@ -310,12 +315,21 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
   }
 
   void dragStart(DragStartDetails details) {
+    final viewer = widget.antigenicMapPainter.viewer;
     final mousePos = mousePosition(details.globalPosition);
-    final regionPathVertices = widget.antigenicMapPainter.viewer.regions.verticesByCoordinates(mousePos);
+    // Region vertex editing takes priority and is always available.
+    final regionPathVertices = viewer.regions.verticesByCoordinates(mousePos);
     if (regionPathVertices.isNotEmpty) {
       _draggedVertex = regionPathVertices[0];
       _mouseCursorDraggingRegionVertex();
       // print("DragStart $_draggedVertex");
+    } else if (viewer.movePointsMode || _movePointModifierHeld()) {
+      // Not on a region vertex: in move-points mode (menu toggle) or while shift is held, grab the topmost point.
+      final points = viewer.pointLookupByCoordinates.lookupByMouseCoordinates(mousePos);
+      if (points.isNotEmpty) {
+        _draggedPoint = points[0];
+        _mouseCursorDraggingRegionVertex();
+      }
     }
   }
 
@@ -327,6 +341,10 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
       //setState(() {});
       // print("dragUpdate $mousePos ${widget.antigenicMapPainter.viewer.regions.reportRegion(_draggedVertex!)}");
       // print("DragUpdate $_draggedVertex $mousePos");
+    } else if (_draggedPoint != null) {
+      final mousePos = mousePosition(details.globalPosition);
+      widget.antigenicMapPainter.viewer.data.movePoint(_draggedPoint!, mousePos);
+      widget.updateCallback();
     }
   }
 
@@ -337,6 +355,12 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
           .reportRegion(_draggedVertex!, vec.Vector3(widget.antigenicMapPainter.viewer.data.viewport!.left, widget.antigenicMapPainter.viewer.data.viewport!.top, 0.0)));
       _draggedVertex = null;
       _mouseCursorReset();
+    } else if (_draggedPoint != null) {
+      final moved = widget.antigenicMapPainter.viewer.data.movedPoints.toList()..sort();
+      info("[move] point $_draggedPoint repositioned; moved points so far: $moved");
+      _draggedPoint = null;
+      _mouseCursorReset();
+      widget.updateCallback(); // refresh the menu's moved-points summary
     }
   }
 
@@ -347,6 +371,10 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
 
   bool isLocked() {
     return HardwareKeyboard.instance.logicalKeysPressed.intersection(_lockKeys).isNotEmpty;
+  }
+
+  bool _movePointModifierHeld() {
+    return HardwareKeyboard.instance.logicalKeysPressed.intersection(_movePointKeys).isNotEmpty;
   }
 }
 
@@ -374,6 +402,7 @@ class _MenuSectionColumnWidgetState extends State<MenuSectionColumnWidget> {
       _MenuSectionFile(widget.antigenicMapViewWidgetState.viewer.data),
       _MenuSectionColorByAA(this),
       _MenuSectionRegion(this),
+      _MenuSectionMovePoints(this),
       _MenuSectionStyles(widget.antigenicMapViewWidgetState, isExpanded: true),
     ];
     super.initState();
@@ -673,6 +702,53 @@ class _MenuSectionRegion extends _MenuSection {
   }
 }
 
+class _MenuSectionMovePoints extends _MenuSection {
+  final _MenuSectionColumnWidgetState _menuSectionColumn;
+
+  _MenuSectionMovePoints(this._menuSectionColumn, {bool isExpanded = false}) : super(isExpanded);
+
+  AntigenicMapViewer get _viewer => _menuSectionColumn.widget.antigenicMapViewWidgetState.viewer;
+
+  @override
+  ExpansionPanel build() {
+    final moved = _viewer.data.movedPoints.toList()..sort();
+    return ExpansionPanel(
+      canTapOnHeader: true,
+      headerBuilder: (BuildContext context, bool isExpanded) => const ListTile(title: Text("Move points")),
+      body: Material(
+        color: const Color(0xFFF0F8FF),
+        shape: Border.all(color: const Color(0xFFA0C0FF)),
+        child: Column(
+          children: [
+            SwitchListTile(
+              title: const Text("Drag to move points"),
+              subtitle: const Text("When on, dragging an antigen/serum repositions it. (Or hold Shift while dragging.)"),
+              value: _viewer.movePointsMode,
+              onChanged: (bool value) {
+                _viewer.movePointsMode = value;
+                _menuSectionColumn.redraw();
+              },
+            ),
+            ListTile(
+              title: Text(moved.isEmpty ? "No points moved" : "Moved ${moved.length} point(s): ${moved.join(', ')}"),
+              trailing: moved.isEmpty
+                  ? null
+                  : TextButton(
+                      child: const Text("Reset"),
+                      onPressed: () {
+                        _viewer.data.resetMovedPoints();
+                        _menuSectionColumn.widget.antigenicMapViewWidgetState.update();
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+      isExpanded: _isExpanded,
+    );
+  }
+}
+
 // ----------------------------------------------------------------------
 
 class AntigenicMapViewWidgetMenu extends StatelessWidget {
@@ -734,6 +810,10 @@ class AntigenicMapViewer {
   var canvasSize = const Size(0, 0);
   final pointLookupByCoordinates = PointLookupByCoordinates();
   final regions = Regions();
+
+  /// When true, dragging on an antigen/serum point repositions it (the WHO-CC "adjust" step). Off by default so
+  /// ordinary interaction (hover, region editing) never moves points by accident. Toggled from the menu.
+  bool movePointsMode = false;
 
   AntigenicMapViewer(this.data);
 

@@ -369,8 +369,42 @@ class Projection extends _JsonAccess {
 
   void _makeTransformedLayout() {
     _transformedLayout = layout.map((element) => element != null ? _transformation.transform3(element) : null).toList();
-    _viewport = Viewport.hullLayout(_transformedLayout)..roundAndRecenter(_transformedLayout, numberOfDimensions);
+    _viewport = Viewport.hullLayout(_transformedLayout);
+    _recenterAdjust = _viewport.roundAndRecenter(_transformedLayout, numberOfDimensions);
     // _transformedLayout.asMap().forEach((index, value) => print("${index.toString().padLeft(4, ' ')} $value"));
+  }
+
+  // ----------------------------------------------------------------------
+  // Interactive point moving (used by the map viewer drag gesture).
+  //
+  // The viewer works in the *transformed* (viewport) coordinate space — that is what is painted and hit-tested.
+  // To make exportToJson() reflect the move we must write the *raw* (untransformed) coordinate back into the
+  // underlying json layout ("l"), inverting both the recentering done by roundAndRecenter() and the projection
+  // transformation ("t"). data["t"] is left unchanged so the ae side reads the edited layout consistently.
+
+  /// Move point [pointNo] to [newTransformedPos] (transformed/viewport coordinates). Remembers the original
+  /// position the first time a point is moved so the move can be undone with [resetMovedPoints].
+  void moveTransformedPoint(int pointNo, Vector3 newTransformedPos) {
+    _originalPositions.putIfAbsent(pointNo, () {
+      final current = _transformedLayout[pointNo];
+      return current != null ? Vector3.copy(current) : Vector3.zero();
+    });
+    _writeTransformedPoint(pointNo, newTransformedPos);
+  }
+
+  /// Restore every moved point to its original position and forget the moves.
+  void resetMovedPoints() {
+    _originalPositions.forEach(_writeTransformedPoint);
+    _originalPositions.clear();
+  }
+
+  void _writeTransformedPoint(int pointNo, Vector3 newTransformedPos) {
+    final transformed = Vector3.copy(newTransformedPos);
+    if (numberOfDimensions < 3) transformed.z = 0.0;
+    _transformedLayout[pointNo] = transformed;
+    final rawPos = (Matrix4.copy(_transformation)..invert()).transform3(transformed - _recenterAdjust);
+    layout[pointNo] = rawPos;
+    data["l"][pointNo] = numberOfDimensions == 3 ? [rawPos.x, rawPos.y, rawPos.z] : [rawPos.x, rawPos.y];
   }
 
   // ----------------------------------------------------------------------
@@ -380,6 +414,8 @@ class Projection extends _JsonAccess {
   final Matrix4 _transformation;
   late Layout _transformedLayout;
   late Viewport _viewport;
+  late Vector3 _recenterAdjust;
+  final Map<int, Vector3> _originalPositions = {};
 }
 
 typedef Projections = List<Projection>;
