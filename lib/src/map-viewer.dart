@@ -911,7 +911,19 @@ class AntigenicMapViewer {
 
     paintLegend(canvas);
     paintTitle(canvas);
+    if (canvas.isInteractive) paintStress(canvas); // diagnostic overlay, interactive viewer only (not PDF)
     // pointLookupByCoordinates.report();
+  }
+
+  void paintStress(DrawOn canvas) {
+    if (data.chart == null || data.projection == null) return;
+    final stress = data.chart!.computeStress(data.projection!); // computed live so it tracks point drags
+    if (stress == null) return;
+    const fontSizePixels = 16.0;
+    final text = stress.toStringAsFixed(2);
+    final size = canvas.textSize(text, sizePixels: fontSizePixels);
+    final padding = fontSizePixels * canvas.pixelSize * 0.4;
+    canvas.text(text, Offset(canvas.viewport.left + padding, canvas.viewport.bottom - size.height - padding), sizePixels: fontSizePixels);
   }
 
   void paintSelection(DrawOn canvas, List<vec.Vector3?> layout) {

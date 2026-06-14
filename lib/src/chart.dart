@@ -91,6 +91,71 @@ class Chart extends _JsonAccess {
   }
 
   // ----------------------------------------------------------------------
+  // Live stress, computed the same way as ae_backend chart_v3 (verified to match to 6 d.p.). Used to show a
+  // stress readout that updates as the operator drags points (kateri has no optimizer, but it can evaluate stress).
+
+  /// Per-serum column bases: the forced bases ("C") if present, else each serum's max loggedForColumnBases
+  /// (which adds 1 for ">" titers), floored by the minimum column basis.
+  List<double> columnBases(Projection projection) {
+    final forced = projection.forcedColumnBases();
+    if (forced != null && forced.isNotEmpty) return forced;
+    final floor = _minimumColumnBasisLogged(projection.minimumColumnBasis());
+    return List<double>.generate(sera.length, (s) {
+      var maxLogged = floor;
+      for (var a = 0; a < antigens.length; ++a) {
+        final t = titers.titer(a, s);
+        if (!t.isDontCare) {
+          final l = t.loggedForColumnBases;
+          if (l > maxLogged) maxLogged = l;
+        }
+      }
+      return maxLogged;
+    });
+  }
+
+  /// Stress of [projection] for its current (possibly user-edited) layout. Regular titers contribute
+  /// (tableDist - mapDist)^2; "<" titers a sigmoid-weighted one-sided penalty; ">" titers are excluded (as in
+  /// chart_v3); tableDist = columnBasis - log2(titer/10), clamped to >= 0. Map distances are rotation/translation
+  /// invariant, so the transformed layout is used. Returns null when there are no contributing titers.
+  double? computeStress(Projection projection) {
+    final layout = projection.transformedLayout();
+    final cb = columnBases(projection);
+    final nAg = antigens.length;
+    var stress = 0.0;
+    var any = false;
+    for (var s = 0; s < sera.length; ++s) {
+      final srPos = layout[nAg + s];
+      if (srPos == null) continue;
+      for (var a = 0; a < nAg; ++a) {
+        final agPos = layout[a];
+        if (agPos == null) continue;
+        final t = titers.titer(a, s);
+        if (t.isDontCare || t.isMoreThan) continue;
+        var tableDist = cb[s] - t.logged;
+        if (tableDist < 0) tableDist = 0.0;
+        final mapDist = agPos.distanceTo(srPos);
+        if (t.isLessThan) {
+          final diff = tableDist - mapDist + 1.0;
+          stress += diff * diff * _sigmoid(diff * 10.0);
+        } else {
+          final diff = tableDist - mapDist;
+          stress += diff * diff;
+        }
+        any = true;
+      }
+    }
+    return any ? stress : null;
+  }
+
+  static double _sigmoid(double x) => 1.0 / (1.0 + math.exp(-x));
+
+  static double _minimumColumnBasisLogged(String mcb) {
+    if (mcb == "none" || mcb.isEmpty) return double.negativeInfinity;
+    final v = double.tryParse(mcb);
+    return v != null ? math.log(v / 10.0) / math.ln2 : double.negativeInfinity;
+  }
+
+  // ----------------------------------------------------------------------
 
   Titer homologousTiterForSerum(int serumNo) {
     final serum = sera[serumNo];
@@ -332,7 +397,7 @@ class Projection extends _JsonAccess {
 
   String minimumColumnBasis() => data["m"] ?? "none";
 
-  List<double> forcedColumnBases() => data["C"]?.cast<double>().toList();
+  List<double>? forcedColumnBases() => data["C"]?.cast<double>().toList();
 
   List<int> disconnectedPoints() => data["D"]?.cast<int>().toList() ?? [];
   List<int> unmovablePoints() => data["U"]?.cast<int>().toList() ?? [];

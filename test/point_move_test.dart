@@ -93,6 +93,38 @@ void main() {
     expect((trMoved.y - trRef.y), closeTo(dropAt.y - dRef.y, 1e-9));
   });
 
+  test('computeStress matches ae_backend formula (regular + less-than, more-than excluded)', () {
+    // Same chart + titers used to cross-check against ae_backend.stress() (= 56.967159).
+    final json = {
+      "c": {
+        "i": {"V": "TEST", "A": "HI"},
+        "a": [for (var i = 0; i < 4; ++i) {"N": "AG$i"}],
+        "s": [for (var i = 0; i < 3; ++i) {"N": "SR$i", "I": "s$i"}],
+        "t": {
+          "l": [
+            ["1280", "<10", "320"],
+            [">5120", "160", "40"],
+            ["80", "640", "*"],
+            ["160", "320", "2560"],
+          ]
+        },
+        "P": [
+          {
+            "l": [
+              [-2.0, -1.0], [1.0, 1.5], [0.0, -2.0], [2.0, 0.5], // antigens
+              [-1.0, 2.0], [2.5, -1.5], [0.5, 0.5], // sera
+            ],
+            "m": "none",
+          },
+        ],
+      },
+    };
+    final chart = Chart(utf8.encode(jsonEncode(json)));
+    final stress = chart.computeStress(chart.projections[0]);
+    expect(stress, isNotNull);
+    expect(stress!, closeTo(56.967159, 1e-5));
+  });
+
   test('resetMovedPoints restores original coordinates', () {
     final chart = _makeChart(transformation: [1.0, 0.0, 0.0, -1.0]);
     final proj = chart.projections[0];

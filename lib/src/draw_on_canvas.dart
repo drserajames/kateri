@@ -58,6 +58,9 @@ class _DrawOnCanvas extends DrawOn {
   double get pixelSize => _pixelSize;
 
   @override
+  bool get isInteractive => true;
+
+  @override
   void transform(Matrix4 transformation) {
     canvas.transform(transformation.storage);
   }

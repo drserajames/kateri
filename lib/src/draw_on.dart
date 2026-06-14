@@ -397,6 +397,10 @@ abstract class DrawOn {
 
   double get pixelSize;
 
+  /// True for the interactive on-screen canvas, false for PDF/other export targets. Lets callers add overlays
+  /// (e.g. the stress readout) only in the viewer, not in exported documents. Overridden by the PDF DrawOn.
+  bool get isInteractive => false;
+
   void transform(Matrix4 transformation);
 
   // ----------------------------------------------------------------------
