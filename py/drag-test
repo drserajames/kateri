@@ -14,8 +14,16 @@ from pathlib import Path
 KATERI_EXE = Path(__file__).parent.joinpath("../build/macos/Build/Products/Release/kateri.app/Contents/MacOS/kateri").resolve()
 CHART = Path(__file__).parent.joinpath("drag-test-chart.json")
 
+try:
+    import ae_backend.chart_v3 as cv3
+    HAVE_AE = True
+except ImportError:
+    HAVE_AE = False
+    print(">>> ae_backend not importable — RLAX will only fetch (no real relax). Run with python3.10 + PYTHONPATH=.../build.", file=sys.stderr, flush=True)
+
 command_id = 0
 writer_g = None
+relax_pending = False
 
 def send(data_code: bytes, data: bytes):
     writer_g.write(data_code)
@@ -39,7 +47,7 @@ async def read_payload(reader):
     return data
 
 async def connected(reader, writer):
-    global writer_g
+    global writer_g, relax_pending
     writer_g = writer
     cmd_file = Path(sys.argv[2])
     print(">>> connected", file=sys.stderr, flush=True)
@@ -50,20 +58,36 @@ async def connected(reader, writer):
             await writer.drain()
             asyncio.create_task(poll_commands(cmd_file, writer))
         elif request == "RLAX":
-            # Unsolicited notification from kateri's Relax button (bare 4-byte code, like HELO). Simulate what
-            # the real ae side would do: pull the moved indices + edited chart (then it would pin+relax+send back).
-            print(">>> RLAX received from kateri — simulating ae relax trigger: fetching moved points + chart", flush=True)
-            send_command({"C": "get_moved_points"})
+            # Unsolicited notification from kateri's Relax button (bare 4-byte code, like HELO). This is what the
+            # real ae side does: pull the edited chart, relax the whole map (every point free — NO pinning), and
+            # push the relaxed chart back so kateri re-renders it. We fetch get_chart and relax its reply below.
+            print(f">>> RLAX received from kateri — relaxing the whole map ({'ae_backend' if HAVE_AE else 'fetch-only, no ae_backend'})", flush=True)
+            relax_pending = True
+            send_command({"C": "get_moved_points"})  # informational only
             send_command({"C": "get_chart"})
             await writer.drain()
         elif request in ["CHRT", "JSON", "PDFB"]:
             data = await read_payload(reader)
             if request == "CHRT":
-                chart = json.loads(data)
-                layout = chart["c"]["P"][0]["l"]
-                print(f"<<< CHRT ({len(data)} bytes) layout:", flush=True)
-                for i, p in enumerate(layout):
-                    print(f"      [{i}] {p}", flush=True)
+                if relax_pending and HAVE_AE:
+                    relax_pending = False
+                    try:
+                        chart = cv3.chart_from_json(data)
+                        proj = chart.projection(0)
+                        before = proj.stress()
+                        proj.relax()  # all points free to move; nothing pinned
+                        print(f"<<< CHRT ({len(data)} bytes) -> relaxed, stress {before:.4f} -> {proj.stress():.4f}; sending back", flush=True)
+                        send(b"CHRT", chart.export())
+                        await writer.drain()
+                    except Exception as err:
+                        print(f">> relax failed: {err}", file=sys.stderr, flush=True)
+                else:
+                    relax_pending = False
+                    chart = json.loads(data)
+                    layout = chart["c"]["P"][0]["l"]
+                    print(f"<<< CHRT ({len(data)} bytes) layout:", flush=True)
+                    for i, p in enumerate(layout):
+                        print(f"      [{i}] {p}", flush=True)
             elif request == "JSON":
                 print(f"<<< JSON {json.loads(data)}", flush=True)
             else:

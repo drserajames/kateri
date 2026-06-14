@@ -44,6 +44,10 @@ class AntigenicMapViewerData {
   /// can pin them (Projection.set_unmovable) before relaxing. Antigens come first (0..nAg-1), then sera.
   final Set<int> movedPoints = <int>{};
 
+  /// Point (layout) indexes currently selected via a rubber-band box. Dragging a selected point moves the whole
+  /// set together. Antigens come first (0..nAg-1), then sera.
+  final Set<int> selectedPoints = <int>{};
+
   AntigenicMapViewerData(this._callbacks);
 
   void setChart(Chart aChart) {
@@ -51,6 +55,7 @@ class AntigenicMapViewerData {
     projection = chart!.projections[0];
     plotSpecs = chart!.plotSpecs(projection);
     movedPoints.clear();
+    selectedPoints.clear();
     _chartBeingLoaded = false;
     _callbacks.hideMessage();
     currentPlotSpecIndex = -1;
@@ -73,21 +78,44 @@ class AntigenicMapViewerData {
     movedPoints.clear();
   }
 
+  /// Select every shown point whose (transformed) coordinate falls within the box with corners [c1] and [c2]
+  /// (both in transformed/viewport coordinates). Replaces the previous selection.
+  void selectPointsInBox(Vector3 c1, Vector3 c2) {
+    selectedPoints.clear();
+    if (projection == null || currentPlotSpecIndex < 0) return;
+    final layout = projection!.transformedLayout();
+    final minX = c1.x < c2.x ? c1.x : c2.x, maxX = c1.x < c2.x ? c2.x : c1.x;
+    final minY = c1.y < c2.y ? c1.y : c2.y, maxY = c1.y < c2.y ? c2.y : c1.y;
+    final spec = currentPlotSpec;
+    for (var i = 0; i < layout.length; ++i) {
+      final p = layout[i];
+      if (p != null && spec[i].shown && p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY) {
+        selectedPoints.add(i);
+      }
+    }
+  }
+
+  void clearSelection() {
+    selectedPoints.clear();
+  }
+
   /// True when driven by a server (ae) over the socket, i.e. relax can be requested.
   bool get connectedToServer => _socket != null;
 
-  /// Ask the server (ae) to relax the map with the moved points pinned. Sends an unsolicited RLAX notification
-  /// over the socket — a bare 4-byte code with no payload, exactly like the HELO/QUIT handshake frames (NOT the
-  /// length-prefixed CHRT/JSON/PDFB response framing). kateri itself never relaxes; the server is expected to
-  /// react by pulling the edited layout (get_chart) and moved indices (get_moved_points), pinning those points
-  /// (Projection.set_unmovable), relaxing, and pushing the relaxed chart back (CHRT) — which kateri re-renders.
+  /// Ask the server (ae) to relax (re-optimize) the map. Sends an unsolicited RLAX notification over the socket —
+  /// a bare 4-byte code with no payload, exactly like the HELO/QUIT handshake frames (NOT the length-prefixed
+  /// CHRT/JSON/PDFB response framing). kateri itself never relaxes; the server is expected to react by pulling
+  /// the edited layout (get_chart) and relaxing the whole map from those positions — every point free to move,
+  /// nothing pinned — then pushing the relaxed chart back (CHRT), which kateri re-renders. The dragged points
+  /// merely provide better starting positions to escape local optima. (get_moved_points remains available as
+  /// informational reporting of which points the operator touched.)
   void requestRelax() {
     if (_socket == null) {
       _callbacks.showMessage("Not connected to a server — relax runs on the ae side over the socket.");
       return;
     }
     _socket!.write("RLAX");
-    info("[relax] requested; ${movedPoints.length} moved point(s) to pin");
+    info("[relax] requested; ${movedPoints.length} point(s) moved this session");
   }
 
   void setChartFromBytes(Uint8List bytes) {
@@ -99,6 +127,7 @@ class AntigenicMapViewerData {
     projection = null;
     viewport = null;
     movedPoints.clear();
+    selectedPoints.clear();
     _chartBeingLoaded = false;
     currentPlotSpecIndex = -1;
     _callbacks.updateCallback();

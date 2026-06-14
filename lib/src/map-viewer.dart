@@ -251,6 +251,9 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
   static final _movePointKeys = Set<LogicalKeyboardKey>.unmodifiable(<LogicalKeyboardKey>[LogicalKeyboardKey.shift, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.shiftRight]);
   RegionVertexRef? _draggedVertex;
   int? _draggedPoint; // antigen/serum point being dragged (move-points mode), null if none
+  vec.Vector3? _selectStart; // rubber-band box-selection start (viewport coords), null if not selecting
+  Map<int, vec.Vector3>? _groupMoveOrigins; // original positions when dragging a multi-point selection together
+  vec.Vector3? _groupMoveStart; // mouse position where the group drag began
   SystemMouseCursor cursor = SystemMouseCursors.basic;
 
   @override
@@ -322,45 +325,76 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
     if (regionPathVertices.isNotEmpty) {
       _draggedVertex = regionPathVertices[0];
       _mouseCursorDraggingRegionVertex();
-      // print("DragStart $_draggedVertex");
-    } else if (viewer.movePointsMode || _movePointModifierHeld()) {
-      // Not on a region vertex: in move-points mode (menu toggle) or while shift is held, grab the topmost point.
+      return;
+    }
+    // In move-points mode (menu toggle) or while shift is held, grab the topmost point under the cursor.
+    if (viewer.movePointsMode || _movePointModifierHeld()) {
       final points = viewer.pointLookupByCoordinates.lookupByMouseCoordinates(mousePos);
       if (points.isNotEmpty) {
         _draggedPoint = points[0];
+        // If the grabbed point belongs to a multi-point selection, drag the whole selection together (by offset).
+        final selected = viewer.data.selectedPoints;
+        if (selected.contains(_draggedPoint) && selected.length > 1) {
+          final layout = viewer.data.projection!.transformedLayout();
+          _groupMoveStart = mousePos;
+          _groupMoveOrigins = {
+            for (final p in selected)
+              if (layout[p] != null) p: vec.Vector3.copy(layout[p]!)
+          };
+        }
         _mouseCursorDraggingRegionVertex();
+        return;
       }
     }
+    // Otherwise start a rubber-band box selection.
+    _selectStart = mousePos;
+    viewer.selectionBoxStart = mousePos;
+    viewer.selectionBoxEnd = mousePos;
+    widget.updateCallback();
   }
 
   void dragUpdate(DragUpdateDetails details) {
+    final viewer = widget.antigenicMapPainter.viewer;
+    final mousePos = mousePosition(details.globalPosition);
     if (_draggedVertex != null) {
-      final mousePos = mousePosition(details.globalPosition);
-      widget.antigenicMapPainter.viewer.regions.vertexMove(_draggedVertex!, mousePos);
-      widget.updateCallback(); //
-      //setState(() {});
-      // print("dragUpdate $mousePos ${widget.antigenicMapPainter.viewer.regions.reportRegion(_draggedVertex!)}");
-      // print("DragUpdate $_draggedVertex $mousePos");
+      viewer.regions.vertexMove(_draggedVertex!, mousePos);
+      widget.updateCallback();
     } else if (_draggedPoint != null) {
-      final mousePos = mousePosition(details.globalPosition);
-      widget.antigenicMapPainter.viewer.data.movePoint(_draggedPoint!, mousePos);
+      if (_groupMoveOrigins != null) {
+        final delta = mousePos - _groupMoveStart!;
+        _groupMoveOrigins!.forEach((p, origin) => viewer.data.movePoint(p, origin + delta));
+      } else {
+        viewer.data.movePoint(_draggedPoint!, mousePos);
+      }
+      widget.updateCallback();
+    } else if (_selectStart != null) {
+      viewer.selectionBoxEnd = mousePos;
       widget.updateCallback();
     }
   }
 
   void dragEnd(DragEndDetails details) {
     // no position in details
+    final viewer = widget.antigenicMapPainter.viewer;
     if (_draggedVertex != null) {
-      print(widget.antigenicMapPainter.viewer.regions
-          .reportRegion(_draggedVertex!, vec.Vector3(widget.antigenicMapPainter.viewer.data.viewport!.left, widget.antigenicMapPainter.viewer.data.viewport!.top, 0.0)));
+      print(viewer.regions.reportRegion(_draggedVertex!, vec.Vector3(viewer.data.viewport!.left, viewer.data.viewport!.top, 0.0)));
       _draggedVertex = null;
       _mouseCursorReset();
     } else if (_draggedPoint != null) {
-      final moved = widget.antigenicMapPainter.viewer.data.movedPoints.toList()..sort();
-      info("[move] point $_draggedPoint repositioned; moved points so far: $moved");
+      final moved = viewer.data.movedPoints.toList()..sort();
+      info("[move] ${_groupMoveOrigins != null ? '${_groupMoveOrigins!.length} selected points' : 'point $_draggedPoint'} repositioned; moved points so far: $moved");
       _draggedPoint = null;
+      _groupMoveOrigins = null;
+      _groupMoveStart = null;
       _mouseCursorReset();
       widget.updateCallback(); // refresh the menu's moved-points summary
+    } else if (_selectStart != null) {
+      viewer.data.selectPointsInBox(viewer.selectionBoxStart!, viewer.selectionBoxEnd!);
+      viewer.selectionBoxStart = null;
+      viewer.selectionBoxEnd = null;
+      _selectStart = null;
+      info("[select] ${viewer.data.selectedPoints.length} point(s) selected: ${viewer.data.selectedPoints.toList()..sort()}");
+      widget.updateCallback();
     }
   }
 
@@ -715,6 +749,7 @@ class _MenuSectionMovePoints extends _MenuSection {
   @override
   ExpansionPanel build() {
     final moved = _viewer.data.movedPoints.toList()..sort();
+    final selected = _viewer.data.selectedPoints.toList()..sort();
     return ExpansionPanel(
       canTapOnHeader: true,
       headerBuilder: (BuildContext context, bool isExpanded) => const ListTile(title: Text("Move points")),
@@ -733,6 +768,19 @@ class _MenuSectionMovePoints extends _MenuSection {
               },
             ),
             ListTile(
+              title: Text(selected.isEmpty ? "No points selected" : "Selected ${selected.length} point(s)"),
+              subtitle: const Text("Drag a box on empty space to select; drag a selected point to move them together."),
+              trailing: selected.isEmpty
+                  ? null
+                  : TextButton(
+                      child: const Text("Clear"),
+                      onPressed: () {
+                        _viewer.data.clearSelection();
+                        _menuSectionColumn.widget.antigenicMapViewWidgetState.update();
+                      },
+                    ),
+            ),
+            ListTile(
               title: Text(moved.isEmpty ? "No points moved" : "Moved ${moved.length} point(s): ${moved.join(', ')}"),
               trailing: moved.isEmpty
                   ? null
@@ -749,9 +797,9 @@ class _MenuSectionMovePoints extends _MenuSection {
               child: SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  // Asks the server to pin the moved points and relax; the relaxed map comes back as a new chart.
+                  // Asks the server to re-optimize (relax) the whole map; the relaxed map comes back as a new chart.
                   onPressed: _viewer.data.connectedToServer ? () => _viewer.data.requestRelax() : null,
-                  child: Text(_viewer.data.connectedToServer ? "Relax (pin moved points, settle the rest)" : "Relax — needs server connection"),
+                  child: Text(_viewer.data.connectedToServer ? "Relax map (re-optimize all points)" : "Relax — needs server connection"),
                 ),
               ),
             ),
@@ -829,6 +877,11 @@ class AntigenicMapViewer {
   /// ordinary interaction (hover, region editing) never moves points by accident. Toggled from the menu.
   bool movePointsMode = false;
 
+  /// Corners of the in-progress rubber-band selection box (transformed/viewport coordinates), null when not
+  /// selecting. Painted as a translucent rectangle while the user drags.
+  vec.Vector3? selectionBoxStart;
+  vec.Vector3? selectionBoxEnd;
+
   AntigenicMapViewer(this.data);
 
   void paint(CanvasRoot canvas) {
@@ -853,11 +906,25 @@ class AntigenicMapViewer {
       }
     });
     canvas.drawDelayed();
+    paintSelection(canvas, layout);
     regions.paint(canvas);
 
     paintLegend(canvas);
     paintTitle(canvas);
     // pointLookupByCoordinates.report();
+  }
+
+  void paintSelection(DrawOn canvas, List<vec.Vector3?> layout) {
+    const highlightColor = Color(0xFFFF7F00); // orange ring around selected points
+    for (final pointNo in data.selectedPoints) {
+      if (pointNo < layout.length && layout[pointNo] != null) {
+        canvas.circle(center: layout[pointNo]!, radius: (data.currentPlotSpec[pointNo].sizePixels / 2 + 4) * canvas.pixelSize, outline: highlightColor, outlineWidthPixels: 2.5);
+      }
+    }
+    if (selectionBoxStart != null && selectionBoxEnd != null) {
+      final rect = Rect.fromPoints(Offset(selectionBoxStart!.x, selectionBoxStart!.y), Offset(selectionBoxEnd!.x, selectionBoxEnd!.y));
+      canvas.rectangle(rect: rect, fill: const Color(0x200080FF), outline: const Color(0xFF0080FF), outlineWidthPixels: 1.5);
+    }
   }
 
   // ----------------------------------------------------------------------
