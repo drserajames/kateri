@@ -125,6 +125,37 @@ void main() {
     expect(stress!, closeTo(56.967159, 1e-5));
   });
 
+  test('chart with integer-serialized coords/transformation/stress loads', () {
+    // ae's chart.export() emits whole numbers as JSON ints; the parser must coerce them to double.
+    final json = {
+      "c": {
+        "i": {"V": "TEST"},
+        "a": [{"N": "AG0"}, {"N": "AG1"}, {"N": "AG2"}],
+        "s": [{"N": "SR0"}],
+        "t": {"l": <dynamic>[]},
+        "P": [
+          {
+            "s": 0, // int stress
+            "t": [1, 0, 0, 1], // int transformation
+            "l": [
+              [0, 0], // int coords
+              [2, 0],
+              [0, 3],
+              [2, 3],
+            ],
+          },
+        ],
+      },
+    };
+    final chart = Chart(utf8.encode(jsonEncode(json)));
+    final proj = chart.projections[0];
+    expect(proj.transformedLayout()[1], isNotNull);
+    expect(proj.stress(), 0.0);
+    // moving still works through the int-origin transformation
+    proj.moveTransformedPoint(1, Vector3(5.0, 5.0, 0.0));
+    expect(_exportedLayoutPoint(chart, 1), isNot(orderedEquals([2, 0])));
+  });
+
   test('resetMovedPoints restores original coordinates', () {
     final chart = _makeChart(transformation: [1.0, 0.0, 0.0, -1.0]);
     final proj = chart.projections[0];

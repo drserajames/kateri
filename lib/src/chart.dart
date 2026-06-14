@@ -393,11 +393,11 @@ class Projection extends _JsonAccess {
 
   // Layout layout() => _layout;
 
-  double? stress() => data["s"];
+  double? stress() => (data["s"] as num?)?.toDouble();
 
   String minimumColumnBasis() => data["m"] ?? "none";
 
-  List<double>? forcedColumnBases() => data["C"]?.cast<double>().toList();
+  List<double>? forcedColumnBases() => (data["C"] as List?)?.map((e) => (e as num).toDouble()).toList();
 
   List<int> disconnectedPoints() => data["D"]?.cast<int>().toList() ?? [];
   List<int> unmovablePoints() => data["U"]?.cast<int>().toList() ?? [];
@@ -406,14 +406,15 @@ class Projection extends _JsonAccess {
   // ----------------------------------------------------------------------
 
   static Vector3? _layoutElement(dynamic src) {
+    // coords may serialize as ints when whole numbers (e.g. ae's chart.export()); coerce so parsing never fails
     switch (src.length) {
       case 0:
       case 1:
         return null;
       case 2:
-        return Vector3(src[0], src[1], 0.0);
+        return Vector3((src[0] as num).toDouble(), (src[1] as num).toDouble(), 0.0);
       case 3:
-        return Vector3(src[0], src[1], src[2]);
+        return Vector3((src[0] as num).toDouble(), (src[1] as num).toDouble(), (src[2] as num).toDouble());
       default:
         return null;
     }
