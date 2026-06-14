@@ -99,6 +99,22 @@ class AntigenicMapViewerData {
     selectedPoints.clear();
   }
 
+  /// Apply one streamed intermediate optimiser layout (a LAYT frame received during an animated relax) and
+  /// repaint. [rawCoords] is a list of per-point [x, y(, z)] (or null for disconnected points) in the projection's
+  /// raw layout space. The viewport, plot style and selection are left untouched so the animation stays smooth;
+  /// the live stress readout updates automatically because it is computed from the displayed layout.
+  void applyLayoutFrame(List<dynamic> rawCoords, {bool commit = false}) {
+    if (projection == null) return;
+    final parsed = rawCoords.map<Vector3?>((c) {
+      if (c is List && c.length >= 2) {
+        return Vector3((c[0] as num).toDouble(), (c[1] as num).toDouble(), c.length >= 3 ? (c[2] as num).toDouble() : 0.0);
+      }
+      return null;
+    }).toList();
+    projection!.setDisplayLayout(parsed, commit: commit);
+    _callbacks.updateCallback();
+  }
+
   /// True when driven by a server (ae) over the socket, i.e. relax can be requested.
   bool get connectedToServer => _socket != null;
 

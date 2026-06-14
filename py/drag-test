@@ -74,11 +74,35 @@ async def connected(reader, writer):
                     try:
                         chart = cv3.chart_from_json(data)
                         proj = chart.projection(0)
+                        npoints = chart.number_of_antigens() + chart.number_of_sera()
+                        start = [list(proj.layout()[i]) if proj.layout()[i] is not None else None for i in range(npoints)]
                         before = proj.stress()
                         proj.relax()  # all points free to move; nothing pinned
-                        print(f"<<< CHRT ({len(data)} bytes) -> relaxed, stress {before:.4f} -> {proj.stress():.4f}; sending back", flush=True)
-                        send(b"CHRT", chart.export())
-                        await writer.drain()
+                        end = [list(proj.layout()[i]) if proj.layout()[i] is not None else None for i in range(npoints)]
+                        # The optimiser returns the layout in a freely chosen gauge (rotation/reflection/
+                        # translation), so align the relaxed layout back onto the start with Procrustes/Kabsch
+                        # before animating. THIS IS WHAT THE REAL ae SIDE MUST DO TO EACH STREAMED FRAME.
+                        import numpy as np
+                        idx = [i for i in range(npoints) if start[i] is not None and end[i] is not None]
+                        if len(idx) >= 2:
+                            A = np.array([start[i] for i in idx]); B = np.array([end[i] for i in idx])
+                            cA, cB = A.mean(0), B.mean(0)
+                            U, _, Vt = np.linalg.svd((B - cB).T @ (A - cA))
+                            R = Vt.T @ U.T  # orthogonal, reflection allowed (maps may be reflected)
+                            full = np.array([(e if e is not None else [0.0, 0.0]) for e in end])
+                            full = (full - cB) @ R.T + cA
+                            end = [list(full[i]) if end[i] is not None else None for i in range(npoints)]
+                        # Stream LAYT frames so kateri animates the relax (last frame "final" commits the layout).
+                        # NOTE: this interpolates start->relaxed; real per-iteration optimiser frames need
+                        # ae_backend's IntermediateLayouts exposed to Python (C++ binding + rebuild).
+                        FRAMES = 24
+                        for f in range(1, FRAMES + 1):
+                            t = f / FRAMES
+                            frame = [[s[0] + (e[0] - s[0]) * t, s[1] + (e[1] - s[1]) * t] if (s and e) else None for s, e in zip(start, end)]
+                            send(b"LAYT", json.dumps({"l": frame, "final": f == FRAMES}).encode())
+                            await writer.drain()
+                            await asyncio.sleep(0.03)
+                        print(f"<<< relaxed, stress {before:.4f} -> {proj.stress():.4f}; streamed {FRAMES} frames (last=final)", flush=True)
                     except Exception as err:
                         print(f">> relax failed: {err}", file=sys.stderr, flush=True)
                 else:

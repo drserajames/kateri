@@ -457,6 +457,25 @@ class Projection extends _JsonAccess {
     _writeTransformedPoint(pointNo, newTransformedPos);
   }
 
+  /// Update only the displayed (transformed) coordinates from a set of raw layout coordinates — used for an
+  /// animated relax, where the server streams intermediate optimiser layouts (LAYT frames). Keeps the viewport
+  /// and recenter fixed so the animation doesn't jump, and does NOT touch the stored raw layout or json (a final
+  /// CHRT delivers the authoritative result). [rawCoords] are in the projection's raw layout space, same order
+  /// and length as the layout; the projection transformation and the existing recenter are applied for display.
+  /// With [commit] true (the final frame of an animated relax), the raw layout and json ("l") are also updated so
+  /// exportToJson()/get_chart return the relaxed coordinates; the viewport is still left unchanged.
+  void setDisplayLayout(List<Vector3?> rawCoords, {bool commit = false}) {
+    final n = rawCoords.length < _transformedLayout.length ? rawCoords.length : _transformedLayout.length;
+    for (var i = 0; i < n; ++i) {
+      final raw = rawCoords[i];
+      _transformedLayout[i] = raw != null ? (_transformation.transform3(Vector3.copy(raw)) + _recenterAdjust) : null;
+      if (commit) {
+        layout[i] = raw;
+        if (raw != null) data["l"][i] = numberOfDimensions == 3 ? [raw.x, raw.y, raw.z] : [raw.x, raw.y];
+      }
+    }
+  }
+
   /// Restore every moved point to its original position and forget the moves.
   void resetMovedPoints() {
     _originalPositions.forEach(_writeTransformedPoint);

@@ -60,6 +60,8 @@ abstract class Event {
         return ChartEvent();
       case "COMD":
         return CommandEvent();
+      case "LAYT":
+        return LayoutFrameEvent();
       default:
         throw FormatError("unrecognized socket event (${source.length - sourceStart}): \"$eventCode\"");
     }
@@ -129,6 +131,36 @@ class ChartEvent extends Event {
       return "ChartEvent(${_data!.length} $_stored bytes)";
     }
   }
+}
+
+// ----------------------------------------------------------------------
+
+/// One intermediate optimiser layout streamed by the server during an animated relax. Payload is JSON
+/// {"l": [[x, y], ...]} of raw layout coordinates (one per point, null/[] for disconnected). Rendered in place
+/// without resetting the viewport/plot style so the relax animates smoothly.
+class LayoutFrameEvent extends Event {
+  List<dynamic> _coords = const [];
+  bool _commit = false; // true for the last frame: commit coords to the model so get_chart returns them
+
+  @override
+  void prepare() {
+    if (_data == null) return;
+    try {
+      final decoded = jsonDecode(utf8.decode(_data!));
+      _coords = (decoded["l"] as List?) ?? const [];
+      _commit = decoded["final"] == true;
+    } catch (err) {
+      throw FormatError("LAYT decoding failed: $err");
+    }
+  }
+
+  @override
+  void act(Socket socket, AntigenicMapViewerData antigenicMapViewerData, SocketEventHandler handler) {
+    antigenicMapViewerData.applyLayoutFrame(_coords, commit: _commit);
+  }
+
+  @override
+  String toString() => "LayoutFrameEvent(${_data?.length ?? 0} bytes${_commit ? ', final' : ''})";
 }
 
 // ----------------------------------------------------------------------
