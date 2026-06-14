@@ -73,6 +73,23 @@ class AntigenicMapViewerData {
     movedPoints.clear();
   }
 
+  /// True when driven by a server (ae) over the socket, i.e. relax can be requested.
+  bool get connectedToServer => _socket != null;
+
+  /// Ask the server (ae) to relax the map with the moved points pinned. Sends an unsolicited RLAX notification
+  /// over the socket — a bare 4-byte code with no payload, exactly like the HELO/QUIT handshake frames (NOT the
+  /// length-prefixed CHRT/JSON/PDFB response framing). kateri itself never relaxes; the server is expected to
+  /// react by pulling the edited layout (get_chart) and moved indices (get_moved_points), pinning those points
+  /// (Projection.set_unmovable), relaxing, and pushing the relaxed chart back (CHRT) — which kateri re-renders.
+  void requestRelax() {
+    if (_socket == null) {
+      _callbacks.showMessage("Not connected to a server — relax runs on the ae side over the socket.");
+      return;
+    }
+    _socket!.write("RLAX");
+    info("[relax] requested; ${movedPoints.length} moved point(s) to pin");
+  }
+
   void setChartFromBytes(Uint8List bytes) {
     setChart(Chart(bytes));
   }

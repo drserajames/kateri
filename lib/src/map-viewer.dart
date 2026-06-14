@@ -744,6 +744,17 @@ class _MenuSectionMovePoints extends _MenuSection {
                       },
                     ),
             ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  // Asks the server to pin the moved points and relax; the relaxed map comes back as a new chart.
+                  onPressed: _viewer.data.connectedToServer ? () => _viewer.data.requestRelax() : null,
+                  child: Text(_viewer.data.connectedToServer ? "Relax (pin moved points, settle the rest)" : "Relax — needs server connection"),
+                ),
+              ),
+            ),
           ],
         ),
       ),

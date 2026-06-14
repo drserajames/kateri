@@ -49,6 +49,13 @@ async def connected(reader, writer):
             send(b"CHRT", CHART.read_bytes())
             await writer.drain()
             asyncio.create_task(poll_commands(cmd_file, writer))
+        elif request == "RLAX":
+            # Unsolicited notification from kateri's Relax button (bare 4-byte code, like HELO). Simulate what
+            # the real ae side would do: pull the moved indices + edited chart (then it would pin+relax+send back).
+            print(">>> RLAX received from kateri — simulating ae relax trigger: fetching moved points + chart", flush=True)
+            send_command({"C": "get_moved_points"})
+            send_command({"C": "get_chart"})
+            await writer.drain()
         elif request in ["CHRT", "JSON", "PDFB"]:
             data = await read_payload(reader)
             if request == "CHRT":
