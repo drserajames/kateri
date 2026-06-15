@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:typed_data'; // Uint8List
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart'; // PointerScrollEvent, kSecondaryButton
 import 'package:flutter/services.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
@@ -159,6 +160,13 @@ class _AntigenicMapViewWidgetState extends State<AntigenicMapViewWidget> with Wi
     updateCallback(plotSpecIndex: viewer.data.addPlotSpecColorByAA(positions));
   }
 
+  void centreMap() {
+    viewer.data.centreMap();
+    aspectRatio = viewer.data.viewport?.aspectRatio() ?? 1.0;
+    if (UniversalPlatform.isMacOS) onWindowResized();
+    setState(() {});
+  }
+
   @override
   void showMessage(String text, {Color backgroundColor = Colors.red}) {
     debug("showMessage \"$text\"");
@@ -190,6 +198,8 @@ class _AntigenicMapViewWidgetState extends State<AntigenicMapViewWidget> with Wi
 
   @override
   void resetWindowSize() async {
+    viewer.data.resetView(); // F9 also resets interactive zoom/pan to fit
+    update();
     const defaultWindowWidth = 785.0;
     await windowManager.setSize(Size(defaultWindowWidth + menuSectionColumnWidth, defaultWindowWidth / aspectRatio + _nativeWindowTitleBarHeight), animate: true);
   }
@@ -264,17 +274,99 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: cursor,
-      onHover: mouseMoved,
-      onExit: mouseExit,
-      child: GestureDetector(
-        child: widget.child,
-        onPanStart: dragStart,
-        onPanUpdate: dragUpdate,
-        onPanEnd: dragEnd,
+    return Listener(
+      onPointerSignal: _onPointerSignal, // mouse wheel -> zoom at cursor
+      onPointerDown: _onPointerDown, // right button -> start pan (mouse)
+      onPointerMove: _onPointerMove,
+      onPointerUp: _onPointerUp,
+      onPointerPanZoomStart: _onPanZoomStart, // trackpad two-finger gesture (pan + pinch zoom)
+      onPointerPanZoomUpdate: _onPanZoomUpdate,
+      onPointerPanZoomEnd: _onPanZoomEnd,
+      child: MouseRegion(
+        cursor: cursor,
+        onHover: mouseMoved,
+        onExit: mouseExit,
+        child: GestureDetector(
+          child: widget.child,
+          onPanStart: dragStart,
+          onPanUpdate: dragUpdate,
+          onPanEnd: dragEnd,
+          onDoubleTap: _resetView, // reset zoom/pan to fit
+        ),
       ),
     );
+  }
+
+  // ---- zoom / pan ----------------------------------------------------------
+
+  int? _panPointer; // pointer id of an in-progress right-button pan, null if none
+  Offset? _panLastPos;
+
+  void _onPointerSignal(PointerSignalEvent ev) {
+    // mouse wheel only; trackpad scrolling/pinching arrives via the pointer-pan-zoom path below
+    if (ev is! PointerScrollEvent || ev.kind == PointerDeviceKind.trackpad) return;
+    final viewer = widget.antigenicMapPainter.viewer;
+    if (viewer.data.chart == null || viewer.data.viewport == null) return;
+    final factor = ev.scrollDelta.dy < 0 ? 1.1 : (1.0 / 1.1); // scroll up = zoom in
+    viewer.data.zoomAt(mousePosition(ev.position), factor);
+    widget.updateCallback();
+  }
+
+  // Trackpad: two-finger drag pans, pinch zooms. Both come through one pan-zoom gesture stream.
+  double _panZoomScale = 1.0;
+
+  void _onPanZoomStart(PointerPanZoomStartEvent ev) {
+    _panZoomScale = 1.0;
+  }
+
+  void _onPanZoomUpdate(PointerPanZoomUpdateEvent ev) {
+    final viewer = widget.antigenicMapPainter.viewer;
+    if (viewer.data.chart == null || viewer.data.viewport == null || viewer.canvasSize.width == 0) return;
+    final viewport = viewer.data.effectiveViewport ?? viewer.data.viewport!;
+    final unitSize = viewer.canvasSize.width / viewport.width;
+    if (ev.panDelta != Offset.zero) {
+      viewer.data.panByWorld(ev.panDelta.dx / unitSize, ev.panDelta.dy / unitSize);
+    }
+    if (ev.scale != _panZoomScale && _panZoomScale > 0) {
+      viewer.data.zoomAt(mousePosition(ev.position), ev.scale / _panZoomScale);
+      _panZoomScale = ev.scale;
+    }
+    widget.updateCallback();
+  }
+
+  void _onPanZoomEnd(PointerPanZoomEndEvent ev) {
+    _panZoomScale = 1.0;
+  }
+
+  void _onPointerDown(PointerDownEvent ev) {
+    if (ev.buttons == kSecondaryButton) {
+      _panPointer = ev.pointer;
+      _panLastPos = ev.position;
+    }
+  }
+
+  void _onPointerMove(PointerMoveEvent ev) {
+    if (_panPointer != ev.pointer || _panLastPos == null) return;
+    final viewer = widget.antigenicMapPainter.viewer;
+    final viewport = viewer.data.effectiveViewport ?? viewer.data.viewport;
+    if (viewport == null || viewer.canvasSize.width == 0) return;
+    final unitSize = viewer.canvasSize.width / viewport.width;
+    final d = ev.position - _panLastPos!;
+    viewer.data.panByWorld(d.dx / unitSize, d.dy / unitSize);
+    _panLastPos = ev.position;
+    widget.updateCallback();
+  }
+
+  void _onPointerUp(PointerUpEvent ev) {
+    if (_panPointer == ev.pointer) {
+      _panPointer = null;
+      _panLastPos = null;
+    }
+  }
+
+  void _resetView() {
+    widget.antigenicMapPainter.viewer.data.resetView();
+    widget.updateCallback();
   }
 
   void _mouseCursorReset() => _setMouseCursor(SystemMouseCursors.basic);
@@ -399,8 +491,10 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
   }
 
   vec.Vector3 mousePosition(Offset rawPosition) {
-    final unitSize = widget.antigenicMapPainter.viewer.canvasSize.width / widget.antigenicMapPainter.viewer.data.viewport!.width;
-    return vec.Vector3(rawPosition.dx / unitSize + widget.antigenicMapPainter.viewer.data.viewport!.left, rawPosition.dy / unitSize + widget.antigenicMapPainter.viewer.data.viewport!.top, 0.0);
+    final viewer = widget.antigenicMapPainter.viewer;
+    final viewport = viewer.data.effectiveViewport ?? viewer.data.viewport!;
+    final unitSize = viewer.canvasSize.width / viewport.width;
+    return vec.Vector3(rawPosition.dx / unitSize + viewport.left, rawPosition.dy / unitSize + viewport.top, 0.0);
   }
 
   bool isLocked() {
@@ -803,6 +897,17 @@ class _MenuSectionMovePoints extends _MenuSection {
                 ),
               ),
             ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  // Reframe the map to fit, centred, and resize the window to match (also clears zoom/pan).
+                  onPressed: () => _menuSectionColumn.widget.antigenicMapViewWidgetState.centreMap(),
+                  child: const Text("Centre map"),
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -886,7 +991,9 @@ class AntigenicMapViewer {
 
   void paint(CanvasRoot canvas) {
     if (data.chart != null && data.viewport != null) {
-      canvas.draw(Offset.zero & canvas.size, data.viewport!, paintOn);
+      // Interactive zoom/pan applies on screen only; PDF export always renders the full (base) viewport.
+      final viewport = canvas is CanvasFlutter ? (data.effectiveViewport ?? data.viewport!) : data.viewport!;
+      canvas.draw(Offset.zero & canvas.size, viewport, paintOn);
       canvasSize = canvas.size;
     }
   }

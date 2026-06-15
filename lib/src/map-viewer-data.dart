@@ -31,7 +31,9 @@ class AntigenicMapViewerData {
   String? chartFilename; // for reloadChart()
   Chart? chart;
   Projection? projection;
-  vp.Viewport? viewport;
+  vp.Viewport? viewport; // base (fit-to-layout) viewport; PDF export and the view-reset use this
+  double viewZoom = 1.0; // interactive zoom factor (>1 zoomed in); 1.0 = fit
+  Offset viewPan = Offset.zero; // interactive pan of the view centre, in viewport coordinate units
   bool _chartBeingLoaded = false;
   Socket? _socket;
   late bool openExportedPdf;
@@ -56,6 +58,7 @@ class AntigenicMapViewerData {
     plotSpecs = chart!.plotSpecs(projection);
     movedPoints.clear();
     selectedPoints.clear();
+    resetView();
     _chartBeingLoaded = false;
     _callbacks.hideMessage();
     currentPlotSpecIndex = -1;
@@ -113,6 +116,54 @@ class AntigenicMapViewerData {
     }).toList();
     projection!.setDisplayLayout(parsed, commit: commit);
     _callbacks.updateCallback();
+  }
+
+  // ----------------------------------------------------------------------
+  // Interactive zoom / pan. Only the drawing viewport is adjusted (uniform scale + offset), so the aspect ratio
+  // is preserved and the window never resizes. PDF export keeps using the base [viewport].
+
+  /// The viewport actually drawn on screen: the base [viewport] with the interactive zoom and pan applied.
+  vp.Viewport? get effectiveViewport {
+    final base = viewport;
+    if (base == null) return null;
+    if (viewZoom == 1.0 && viewPan == Offset.zero) return base;
+    final w = base.width / viewZoom, h = base.height / viewZoom;
+    final cx = base.centerX + viewPan.dx, cy = base.centerY + viewPan.dy;
+    return vp.Viewport.originSizeList([cx - w / 2, cy - h / 2, w, h]);
+  }
+
+  /// Zoom by [factor] (>1 zooms in) keeping [worldPos] (in current viewport coordinates) under the cursor.
+  void zoomAt(Vector3 worldPos, double factor) {
+    final base = viewport;
+    if (base == null) return;
+    final newZoom = (viewZoom * factor).clamp(0.2, 50.0);
+    final r = viewZoom / newZoom; // = newWidth / oldWidth
+    final cx = base.centerX + viewPan.dx, cy = base.centerY + viewPan.dy;
+    final ncx = worldPos.x - r * (worldPos.x - cx);
+    final ncy = worldPos.y - r * (worldPos.y - cy);
+    viewZoom = newZoom;
+    viewPan = Offset(ncx - base.centerX, ncy - base.centerY);
+  }
+
+  /// Pan the view by a delta expressed in viewport coordinate units (content follows the cursor).
+  void panByWorld(double dx, double dy) {
+    viewPan = Offset(viewPan.dx - dx, viewPan.dy - dy);
+  }
+
+  /// Reset zoom and pan back to fit-the-layout.
+  void resetView() {
+    viewZoom = 1.0;
+    viewPan = Offset.zero;
+  }
+
+  /// Reframe the base viewport to fit the current layout centred (e.g. after a relax left the map small and
+  /// off-centre), and clear any interactive zoom/pan. The window is resized to match by the widget.
+  void centreMap() {
+    if (projection == null) return;
+    final hull = vp.Viewport.hullLayout(projection!.transformedLayout());
+    final w = (hull.width + 1).ceilToDouble(), h = (hull.height + 1).ceilToDouble();
+    viewport = vp.Viewport.originSizeList([hull.centerX - w / 2, hull.centerY - h / 2, w, h]);
+    resetView();
   }
 
   /// True when driven by a server (ae) over the socket, i.e. relax can be requested.
