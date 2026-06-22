@@ -333,7 +333,7 @@ class _DrawOnPdf extends DrawOn {
   }
 
   @override
-  void grid({double step = 1.0, Color color = const Color(0xFFCCCCCC), double lineWidthPixels = 1.0}) {
+  void grid({double step = 1.0, Color color = const Color(0xFFB0B0B0), double lineWidthPixels = 1.0}) {
     final colorc = PdfColor.fromInt(color.value);
     _canvas
       ..saveContext()

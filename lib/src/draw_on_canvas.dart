@@ -302,7 +302,7 @@ class _DrawOnCanvas extends DrawOn {
   }
 
   @override
-  void grid({double step = 1.0, Color color = const Color(0xFFCCCCCC), double lineWidthPixels = 1.0}) {
+  void grid({double step = 1.0, Color color = const Color(0xFFB0B0B0), double lineWidthPixels = 1.0}) {
     final left = viewport.left, top = viewport.top, right = viewport.right, bottom = viewport.bottom;
     var path = Path();
     for (var x = left; x <= right; x += step) {
