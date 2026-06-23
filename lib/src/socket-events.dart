@@ -52,9 +52,9 @@ abstract class Event {
 
   void act(Socket socket, AntigenicMapViewerData antigenicMapViewerData, SocketEventHandler handler);
 
-  /// source starts with 4 bytes of code followed by 4 bytes of data size followed by data
-  factory Event.create(Uint8List source, int sourceStart) {
-    final eventCode = String.fromCharCodes(source, sourceStart, sourceStart + 4);
+  /// Build an event for the 4-byte [eventCode] parsed from the wire (the payload is read separately
+  /// via [allocate]/[fill]). All events kateri *receives* are length-prefixed (CHRT/COMD/LAYT).
+  factory Event.create(String eventCode) {
     switch (eventCode) {
       case "CHRT":
         return ChartEvent();
@@ -63,32 +63,30 @@ abstract class Event {
       case "LAYT":
         return LayoutFrameEvent();
       default:
-        throw FormatError("unrecognized socket event (${source.length - sourceStart}): \"$eventCode\"");
+        throw FormatError("unrecognized socket event: \"$eventCode\"");
     }
   }
 
-  /// Consume few or all bytes from the source, return number of bytes consumed, store read bytes into _data
-  int consume(Uint8List source, int sourceStart) {
-    final sourceStartInit = sourceStart;
-    if (_data == null) {
-      if ((source.length - sourceStart) < 4) throw FormatError("Event: cannot read data size: too few bytes available (${source.length - sourceStart})");
-      _data = Uint8List(source.buffer.asUint32List(sourceStart, 1)[0]);
-      sourceStart += 4;
-      if ((source.length - sourceStart) <= 4) return sourceStart - sourceStartInit;
-    }
-    final copyCount = min(source.length - sourceStart, _data!.length - _stored);
-    _data!.setRange(_stored, _stored + copyCount, Uint8List.view(source.buffer, sourceStart));
+  /// Allocate the payload buffer once the 8-byte header (code + length) has been parsed.
+  void allocate(int length) {
+    _data = Uint8List(length);
+    _stored = 0;
+  }
+
+  /// Copy as many payload bytes as are available from [source] starting at [start] into the
+  /// preallocated buffer; return the number of bytes consumed. A payload split across several
+  /// socket reads is handled transparently — the remaining bytes arrive in later calls.
+  int fill(Uint8List source, int start) {
+    final copyCount = min(source.length - start, _data!.length - _stored);
+    _data!.setRange(_stored, _stored + copyCount, source, start);
     _stored += copyCount;
-    var consumed = sourceStart - sourceStartInit + copyCount;
-    if (finished()) {
-      // consume padding to make sure next event starts at 4-byte boundary
-      final remainder = copyCount.remainder(4);
-      if (remainder > 0) consumed += 4 - remainder;
-    }
-    return consumed;
+    return copyCount;
   }
 
-  /// Returns if event cannot consume more bytes and ready to be sent further
+  /// Payload length in bytes (0 before [allocate]).
+  int get length => _data?.length ?? 0;
+
+  /// Returns true once the whole payload has been read and the event is ready to dispatch.
   bool finished() {
     return _data != null && _data!.length == _stored;
   }
@@ -277,20 +275,47 @@ class _Transformer extends StreamTransformerBase<Uint8List, Event> {
 class _EventSink implements EventSink<Uint8List> {
   final EventSink<Event> _output;
   Event? _current;
+  // Frame = 4-byte code + 4-byte little-endian length + payload + padding to a 4-byte boundary.
+  // The unix socket hands us arbitrary byte chunks, so any of these parts may be split across reads
+  // (or several frames may arrive in one read). These fields carry the partial-parse state between
+  // add() calls so a split header — the bug that previously crashed the parser and stalled kateri
+  // mid-session — is handled transparently.
+  final Uint8List _header = Uint8List(8); // code + length, assembled byte-by-byte across reads
+  int _headerStored = 0;
+  int _padding = 0; // payload-trailing alignment bytes still to skip before the next frame
 
   _EventSink(this._output);
 
   @override
   void add(Uint8List source) {
-    var sourceStart = 0;
-    // print("_EventSink.add ${source.length} \"${String.fromCharCodes(Uint8List.view(source.buffer, sourceStart, 4))}\" sourceStart:$sourceStart");
-    while (sourceStart < source.length) {
-      if (_current == null) {
-        _current = Event.create(source, sourceStart);
-        sourceStart += 4;
+    var i = 0;
+    final n = source.length;
+    while (i < n) {
+      // 1. skip any 4-byte-alignment padding left over from the previous event's payload
+      if (_padding > 0) {
+        final skip = min(_padding, n - i);
+        i += skip;
+        _padding -= skip;
+        continue;
       }
-      sourceStart += _current!.consume(source, sourceStart);
+      // 2. assemble the 8-byte header (code + length); may span multiple reads
+      if (_current == null) {
+        while (_headerStored < 8 && i < n) {
+          _header[_headerStored++] = source[i++];
+        }
+        if (_headerStored < 8) break; // header incomplete — resume on the next read
+        final code = String.fromCharCodes(_header, 0, 4);
+        // length is little-endian: ae writes len.to_bytes(4, sys.byteorder) and both ends are the same host
+        final length = _header[4] | (_header[5] << 8) | (_header[6] << 16) | (_header[7] << 24);
+        _headerStored = 0;
+        _current = Event.create(code);
+        _current!.allocate(length);
+      }
+      // 3. fill the payload (also possibly split across reads)
+      i += _current!.fill(source, i);
       if (_current!.finished()) {
+        final remainder = _current!.length.remainder(4);
+        _padding = remainder == 0 ? 0 : 4 - remainder;
         _current!.prepare();
         _output.add(_current!);
         _current = null;
