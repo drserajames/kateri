@@ -42,6 +42,10 @@ class CommandLineData extends InheritedWidget {
     parser.addOption("socket", abbr: "s", callback: (arg) {
       socketToConnect = arg;
     });
+    // Consumed natively in MainFlutterWindow.swift (parks the window off-screen for headless PDF
+    // rendering). Registered here so the Dart arg parser accepts it rather than rejecting it as
+    // unrecognized (which would exit the app).
+    parser.addFlag("headless", defaultsTo: false);
     try {
       final results = parser.parse(args);
       if (results.rest.isNotEmpty) throw FormatError("unrecognized data in the command line");
