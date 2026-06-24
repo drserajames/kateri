@@ -21,7 +21,7 @@ abstract class AntigenicMapViewerCallbacks {
   void updateCallback({int? plotSpecIndex});
   void showMessage(String text, {Color backgroundColor = Colors.red});
   void hideMessage();
-  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0});
+  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false});
 }
 
 // ----------------------------------------------------------------------
@@ -356,8 +356,8 @@ class AntigenicMapViewerData {
     }
   }
 
-  Future<Uint8List?> exportPdfToBytes({double width = 800.0}) async {
-    return _callbacks.exportPdf(canvasPdfWidth: width);
+  Future<Uint8List?> exportPdfToBytes({double width = 800.0, bool square = false}) async {
+    return _callbacks.exportPdf(canvasPdfWidth: width, square: square);
   }
 
   // ----------------------------------------------------------------------

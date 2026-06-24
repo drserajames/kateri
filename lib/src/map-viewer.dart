@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 import 'package:vector_math/vector_math_64.dart' as vec;
 import 'package:window_manager/window_manager.dart';
 import 'package:universal_platform/universal_platform.dart';
+import 'viewport.dart' as vp; // kateri's Viewport (Flutter also defines a Viewport widget)
 
 import 'app.dart'; // CommandLineData
 import 'map-viewer-data.dart';
@@ -181,8 +182,8 @@ class _AntigenicMapViewWidgetState extends State<AntigenicMapViewWidget> with Wi
   }
 
   @override
-  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0}) async {
-    return antigenicMapPainter.viewer.exportPdf(canvasPdfWidth: canvasPdfWidth);
+  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false}) async {
+    return antigenicMapPainter.viewer.exportPdf(canvasPdfWidth: canvasPdfWidth, square: square);
   }
 
   // ----------------------------------------------------------------------
@@ -1128,9 +1129,22 @@ class AntigenicMapViewer {
     }
   }
 
-  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0}) async {
+  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false}) async {
     if (data.chart != null && data.viewport != null) {
-      final canvasPdf = CanvasPdf(Size(canvasPdfWidth, canvasPdfWidth / data.viewport!.width * data.viewport!.height))..paintBy(paint);
+      final curVp = data.viewport!;
+      if (square && curVp.width != curVp.height) {
+        // Square export (ae signature-page grid): expand the viewport's short side to the long
+        // side about the same centre, into a square canvas — so the map isn't drawn
+        // taller-than-wide and the points stay undistorted, just centred with side margins.
+        final s = max(curVp.width, curVp.height);
+        final sq = vp.Viewport.originSizeList([curVp.centerX - s / 2, curVp.centerY - s / 2, s, s]);
+        final orig = data.viewport;
+        data.viewport = sq;
+        final canvasPdf = CanvasPdf(Size(canvasPdfWidth, canvasPdfWidth))..paintBy(paint);
+        data.viewport = orig;
+        return canvasPdf.bytes();
+      }
+      final canvasPdf = CanvasPdf(Size(canvasPdfWidth, canvasPdfWidth / curVp.width * curVp.height))..paintBy(paint);
       return canvasPdf.bytes();
     }
     return null;

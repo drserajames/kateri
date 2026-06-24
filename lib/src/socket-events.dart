@@ -230,7 +230,7 @@ class CommandEvent extends Event {
         break;
       case "pdf":
         handler.startProcessing();
-        final pdfData = await antigenicMapViewerData.exportPdfToBytes(width: data["width"]?.toDouble());
+        final pdfData = await antigenicMapViewerData.exportPdfToBytes(width: data["width"]?.toDouble(), square: data["square"] == true);
         if (pdfData != null) {
           send(socket, "PDFB", pdfData);
           // final remainder = pdfData.length.remainder(4);
