@@ -182,8 +182,8 @@ class _AntigenicMapViewWidgetState extends State<AntigenicMapViewWidget> with Wi
   }
 
   @override
-  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false}) async {
-    return antigenicMapPainter.viewer.exportPdf(canvasPdfWidth: canvasPdfWidth, square: square);
+  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false, double viewportSize = 0.0}) async {
+    return antigenicMapPainter.viewer.exportPdf(canvasPdfWidth: canvasPdfWidth, square: square, viewportSize: viewportSize);
   }
 
   // ----------------------------------------------------------------------
@@ -1129,15 +1129,15 @@ class AntigenicMapViewer {
     }
   }
 
-  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false}) async {
+  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false, double viewportSize = 0.0}) async {
     if (data.chart != null && data.viewport != null) {
       final curVp = data.viewport!;
-      if (square && curVp.width != curVp.height) {
-        // Square export (ae signature-page grid): expand the viewport's short side to the long
-        // side about the same centre, into a square canvas — so the map isn't drawn
-        // taller-than-wide and the points stay undistorted, just centred with side margins.
-        final s = max(curVp.width, curVp.height);
-        final sq = vp.Viewport.originSizeList([curVp.centerX - s / 2, curVp.centerY - s / 2, s, s]);
+      // viewportSize > 0 (ae signature pages): render a square viewport of that fixed side
+      // (AD's sp.mapi zoom) centred on the auto-fit centre — matches AD's map framing. Otherwise
+      // `square` just expands the short side to the long side about the same centre.
+      final double side = viewportSize > 0.0 ? viewportSize : (square ? max(curVp.width, curVp.height) : 0.0);
+      if (side > 0.0 && (viewportSize > 0.0 || curVp.width != curVp.height)) {
+        final sq = vp.Viewport.originSizeList([curVp.centerX - side / 2, curVp.centerY - side / 2, side, side]);
         final orig = data.viewport;
         data.viewport = sq;
         final canvasPdf = CanvasPdf(Size(canvasPdfWidth, canvasPdfWidth))..paintBy(paint);
