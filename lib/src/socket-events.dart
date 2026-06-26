@@ -230,9 +230,12 @@ class CommandEvent extends Event {
         break;
       case "pdf":
         handler.startProcessing();
-        final pdfData = await antigenicMapViewerData.exportPdfToBytes(width: data["width"]?.toDouble(), square: data["square"] == true, viewportSize: (data["viewportSize"] ?? 0.0).toDouble());
-        if (pdfData != null) {
-          send(socket, "PDFB", pdfData);
+        try {
+          final pdfData = await antigenicMapViewerData.exportPdfToBytes(width: data["width"]?.toDouble(), square: data["square"] == true, viewportSize: (data["viewportSize"] ?? 0.0).toDouble());
+          // Always answer the awaiting caller: an empty PDFB unblocks the
+          // protocol (the Python side awaits this reply with no timeout) rather
+          // than leaving it hanging when there is no chart/viewport.
+          send(socket, "PDFB", pdfData ?? Uint8List(0));
           // final remainder = pdfData.length.remainder(4);
           // final padding = remainder != 0 ? Uint8List(4 - remainder) : Uint8List(0);
           // final payloadLength = Uint8List(4);
@@ -242,8 +245,14 @@ class CommandEvent extends Event {
           // socket.add(payloadLength);
           // socket.add(pdfData);
           // socket.add(padding);
+        } catch (err, stack) {
+          // A render/encoding exception must not propagate unhandled: it would
+          // break the socket protocol and hang the awaiting Python caller.
+          error("pdf export failed: $err\n$stack");
+          send(socket, "PDFB", Uint8List(0));
+        } finally {
+          handler.endProcessing();
         }
-        handler.endProcessing();
         break;
       case "quit":
         await handler.quit();
