@@ -91,6 +91,71 @@ class Chart extends _JsonAccess {
   }
 
   // ----------------------------------------------------------------------
+  // Live stress, computed the same way as ae_backend chart_v3 (verified to match to 6 d.p.). Used to show a
+  // stress readout that updates as the operator drags points (kateri has no optimizer, but it can evaluate stress).
+
+  /// Per-serum column bases: the forced bases ("C") if present, else each serum's max loggedForColumnBases
+  /// (which adds 1 for ">" titers), floored by the minimum column basis.
+  List<double> columnBases(Projection projection) {
+    final forced = projection.forcedColumnBases();
+    if (forced != null && forced.isNotEmpty) return forced;
+    final floor = _minimumColumnBasisLogged(projection.minimumColumnBasis());
+    return List<double>.generate(sera.length, (s) {
+      var maxLogged = floor;
+      for (var a = 0; a < antigens.length; ++a) {
+        final t = titers.titer(a, s);
+        if (!t.isDontCare) {
+          final l = t.loggedForColumnBases;
+          if (l > maxLogged) maxLogged = l;
+        }
+      }
+      return maxLogged;
+    });
+  }
+
+  /// Stress of [projection] for its current (possibly user-edited) layout. Regular titers contribute
+  /// (tableDist - mapDist)^2; "<" titers a sigmoid-weighted one-sided penalty; ">" titers are excluded (as in
+  /// chart_v3); tableDist = columnBasis - log2(titer/10), clamped to >= 0. Map distances are rotation/translation
+  /// invariant, so the transformed layout is used. Returns null when there are no contributing titers.
+  double? computeStress(Projection projection) {
+    final layout = projection.transformedLayout();
+    final cb = columnBases(projection);
+    final nAg = antigens.length;
+    var stress = 0.0;
+    var any = false;
+    for (var s = 0; s < sera.length; ++s) {
+      final srPos = layout[nAg + s];
+      if (srPos == null) continue;
+      for (var a = 0; a < nAg; ++a) {
+        final agPos = layout[a];
+        if (agPos == null) continue;
+        final t = titers.titer(a, s);
+        if (t.isDontCare || t.isMoreThan) continue;
+        var tableDist = cb[s] - t.logged;
+        if (tableDist < 0) tableDist = 0.0;
+        final mapDist = agPos.distanceTo(srPos);
+        if (t.isLessThan) {
+          final diff = tableDist - mapDist + 1.0;
+          stress += diff * diff * _sigmoid(diff * 10.0);
+        } else {
+          final diff = tableDist - mapDist;
+          stress += diff * diff;
+        }
+        any = true;
+      }
+    }
+    return any ? stress : null;
+  }
+
+  static double _sigmoid(double x) => 1.0 / (1.0 + math.exp(-x));
+
+  static double _minimumColumnBasisLogged(String mcb) {
+    if (mcb == "none" || mcb.isEmpty) return double.negativeInfinity;
+    final v = double.tryParse(mcb);
+    return v != null ? math.log(v / 10.0) / math.ln2 : double.negativeInfinity;
+  }
+
+  // ----------------------------------------------------------------------
 
   Titer homologousTiterForSerum(int serumNo) {
     final serum = sera[serumNo];
@@ -328,11 +393,11 @@ class Projection extends _JsonAccess {
 
   // Layout layout() => _layout;
 
-  double? stress() => data["s"];
+  double? stress() => (data["s"] as num?)?.toDouble();
 
   String minimumColumnBasis() => data["m"] ?? "none";
 
-  List<double> forcedColumnBases() => data["C"]?.cast<double>().toList();
+  List<double>? forcedColumnBases() => (data["C"] as List?)?.map((e) => (e as num).toDouble()).toList();
 
   List<int> disconnectedPoints() => data["D"]?.cast<int>().toList() ?? [];
   List<int> unmovablePoints() => data["U"]?.cast<int>().toList() ?? [];
@@ -341,14 +406,15 @@ class Projection extends _JsonAccess {
   // ----------------------------------------------------------------------
 
   static Vector3? _layoutElement(dynamic src) {
+    // coords may serialize as ints when whole numbers (e.g. ae's chart.export()); coerce so parsing never fails
     switch (src.length) {
       case 0:
       case 1:
         return null;
       case 2:
-        return Vector3(src[0], src[1], 0.0);
+        return Vector3((src[0] as num).toDouble(), (src[1] as num).toDouble(), 0.0);
       case 3:
-        return Vector3(src[0], src[1], src[2]);
+        return Vector3((src[0] as num).toDouble(), (src[1] as num).toDouble(), (src[2] as num).toDouble());
       default:
         return null;
     }
@@ -369,8 +435,61 @@ class Projection extends _JsonAccess {
 
   void _makeTransformedLayout() {
     _transformedLayout = layout.map((element) => element != null ? _transformation.transform3(element) : null).toList();
-    _viewport = Viewport.hullLayout(_transformedLayout)..roundAndRecenter(_transformedLayout, numberOfDimensions);
+    _viewport = Viewport.hullLayout(_transformedLayout);
+    _recenterAdjust = _viewport.roundAndRecenter(_transformedLayout, numberOfDimensions);
     // _transformedLayout.asMap().forEach((index, value) => print("${index.toString().padLeft(4, ' ')} $value"));
+  }
+
+  // ----------------------------------------------------------------------
+  // Interactive point moving (used by the map viewer drag gesture).
+  //
+  // The viewer works in the *transformed* (viewport) coordinate space — that is what is painted and hit-tested.
+  // To make exportToJson() reflect the move we must write the *raw* (untransformed) coordinate back into the
+  // underlying json layout ("l"), inverting both the recentering done by roundAndRecenter() and the projection
+  // transformation ("t"). data["t"] is left unchanged so the ae side reads the edited layout consistently.
+
+  /// Move point [pointNo] to [newTransformedPos] (transformed/viewport coordinates). Remembers the original
+  /// position the first time a point is moved so the move can be undone with [resetMovedPoints].
+  void moveTransformedPoint(int pointNo, Vector3 newTransformedPos) {
+    _originalPositions.putIfAbsent(pointNo, () {
+      final current = _transformedLayout[pointNo];
+      return current != null ? Vector3.copy(current) : Vector3.zero();
+    });
+    _writeTransformedPoint(pointNo, newTransformedPos);
+  }
+
+  /// Update only the displayed (transformed) coordinates from a set of raw layout coordinates — used for an
+  /// animated relax, where the server streams intermediate optimiser layouts (LAYT frames). Keeps the viewport
+  /// and recenter fixed so the animation doesn't jump, and does NOT touch the stored raw layout or json (a final
+  /// CHRT delivers the authoritative result). [rawCoords] are in the projection's raw layout space, same order
+  /// and length as the layout; the projection transformation and the existing recenter are applied for display.
+  /// With [commit] true (the final frame of an animated relax), the raw layout and json ("l") are also updated so
+  /// exportToJson()/get_chart return the relaxed coordinates; the viewport is still left unchanged.
+  void setDisplayLayout(List<Vector3?> rawCoords, {bool commit = false}) {
+    final n = rawCoords.length < _transformedLayout.length ? rawCoords.length : _transformedLayout.length;
+    for (var i = 0; i < n; ++i) {
+      final raw = rawCoords[i];
+      _transformedLayout[i] = raw != null ? (_transformation.transform3(Vector3.copy(raw)) + _recenterAdjust) : null;
+      if (commit) {
+        layout[i] = raw;
+        if (raw != null) data["l"][i] = numberOfDimensions == 3 ? [raw.x, raw.y, raw.z] : [raw.x, raw.y];
+      }
+    }
+  }
+
+  /// Restore every moved point to its original position and forget the moves.
+  void resetMovedPoints() {
+    _originalPositions.forEach(_writeTransformedPoint);
+    _originalPositions.clear();
+  }
+
+  void _writeTransformedPoint(int pointNo, Vector3 newTransformedPos) {
+    final transformed = Vector3.copy(newTransformedPos);
+    if (numberOfDimensions < 3) transformed.z = 0.0;
+    _transformedLayout[pointNo] = transformed;
+    final rawPos = (Matrix4.copy(_transformation)..invert()).transform3(transformed - _recenterAdjust);
+    layout[pointNo] = rawPos;
+    data["l"][pointNo] = numberOfDimensions == 3 ? [rawPos.x, rawPos.y, rawPos.z] : [rawPos.x, rawPos.y];
   }
 
   // ----------------------------------------------------------------------
@@ -380,6 +499,8 @@ class Projection extends _JsonAccess {
   final Matrix4 _transformation;
   late Layout _transformedLayout;
   late Viewport _viewport;
+  late Vector3 _recenterAdjust;
+  final Map<int, Vector3> _originalPositions = {};
 }
 
 typedef Projections = List<Projection>;

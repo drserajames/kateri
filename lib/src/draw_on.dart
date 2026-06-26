@@ -9,6 +9,10 @@ import 'error.dart';
 
 // ----------------------------------------------------------------------
 
+/// Thin white halo painted behind point-label text so labels stay legible over the point cloud,
+/// expressed as a fraction of the label font size. Tune here. (TODO: allow a plot-spec/ae override.)
+const pointLabelHaloWidthFactor = 0.04;
+
 enum PointShape { circle, box, triangle, egg, uglyegg }
 
 String pointShapeToString(PointShape shape) {
@@ -162,17 +166,33 @@ class LabelStyle {
   final LabelFontFamily fontFamily;
   final FontWeight fontWeight;
   final FontStyle fontStyle;
+  final double haloWidthPixels; // white outline painted behind the glyphs; 0 = no halo
+  final Color haloColor;
 
-  const LabelStyle({this.color = const Color(0xFF000000), this.fontFamily = LabelFontFamily.helvetica, this.fontStyle = FontStyle.normal, this.fontWeight = FontWeight.normal});
+  const LabelStyle(
+      {this.color = const Color(0xFF000000),
+      this.fontFamily = LabelFontFamily.helvetica,
+      this.fontStyle = FontStyle.normal,
+      this.fontWeight = FontWeight.normal,
+      this.haloWidthPixels = 0.0,
+      this.haloColor = const Color(0xFFFFFFFF)});
   LabelStyle.from(LabelStyle src)
       : color = src.color,
         fontFamily = src.fontFamily,
         fontWeight = src.fontWeight,
-        fontStyle = src.fontStyle;
+        fontStyle = src.fontStyle,
+        haloWidthPixels = src.haloWidthPixels,
+        haloColor = src.haloColor;
 
   // clone and change field
-  LabelStyle cloneWith({Color? color, LabelFontFamily? fontFamily, FontStyle? fontStyle, FontWeight? fontWeight}) {
-    return LabelStyle(color: color ?? this.color, fontFamily: fontFamily ?? this.fontFamily, fontStyle: fontStyle ?? this.fontStyle, fontWeight: fontWeight ?? this.fontWeight);
+  LabelStyle cloneWith({Color? color, LabelFontFamily? fontFamily, FontStyle? fontStyle, FontWeight? fontWeight, double? haloWidthPixels, Color? haloColor}) {
+    return LabelStyle(
+        color: color ?? this.color,
+        fontFamily: fontFamily ?? this.fontFamily,
+        fontStyle: fontStyle ?? this.fontStyle,
+        fontWeight: fontWeight ?? this.fontWeight,
+        haloWidthPixels: haloWidthPixels ?? this.haloWidthPixels,
+        haloColor: haloColor ?? this.haloColor);
   }
 }
 
@@ -192,8 +212,10 @@ class PointLabel extends LabelStyle {
       required Color color,
       required LabelFontFamily fontFamily,
       required FontStyle fontStyle,
-      required FontWeight fontWeight})
-      : super(color: color, fontFamily: fontFamily, fontStyle: fontStyle, fontWeight: fontWeight);
+      required FontWeight fontWeight,
+      double haloWidthPixels = 0.0,
+      Color haloColor = const Color(0xFFFFFFFF)})
+      : super(color: color, fontFamily: fontFamily, fontStyle: fontStyle, fontWeight: fontWeight, haloWidthPixels: haloWidthPixels, haloColor: haloColor);
 
   static PointLabel apply(
           {String text = "",
@@ -203,8 +225,11 @@ class PointLabel extends LabelStyle {
           Color color = const Color(0xFF000000),
           LabelFontFamily fontFamily = LabelFontFamily.helvetica,
           FontStyle fontStyle = FontStyle.normal,
-          FontWeight fontWeight = FontWeight.normal}) =>
-      PointLabel.fromArgs(text: text, offset: offset, sizePixels: sizePixels, rotation: rotation, color: color, fontFamily: fontFamily, fontStyle: fontStyle, fontWeight: fontWeight);
+          FontWeight fontWeight = FontWeight.normal,
+          double haloWidthPixels = 0.0,
+          Color haloColor = const Color(0xFFFFFFFF)}) =>
+      PointLabel.fromArgs(
+          text: text, offset: offset, sizePixels: sizePixels, rotation: rotation, color: color, fontFamily: fontFamily, fontStyle: fontStyle, fontWeight: fontWeight, haloWidthPixels: haloWidthPixels, haloColor: haloColor);
 
   PointLabel.from(PointLabel src)
       : offset = src.offset,
@@ -397,6 +422,10 @@ abstract class DrawOn {
 
   double get pixelSize;
 
+  /// True for the interactive on-screen canvas, false for PDF/other export targets. Lets callers add overlays
+  /// (e.g. the stress readout) only in the viewer, not in exported documents. Overridden by the PDF DrawOn.
+  bool get isInteractive => false;
+
   void transform(Matrix4 transformation);
 
   // ----------------------------------------------------------------------
@@ -444,7 +473,9 @@ abstract class DrawOn {
     final pointSize = (sizePixels + outlineWidthPixels) * pixelSize / 2;
     final textSize = this.textSize(label.text, sizePixels: label.sizePixels, textStyle: label);
     final Offset offset = Offset(labelOffset(label.offset.dx, pointSize, textSize.width, false), labelOffset(label.offset.dy, pointSize, textSize.height, true));
-    delayedText(label.text, Offset(center.x + offset.dx, center.y + offset.dy), sizePixels: label.sizePixels, rotation: label.rotation, textStyle: label);
+    // give point labels a default thin white halo (unless one was already requested) so they read over the points
+    final textStyle = label.haloWidthPixels > 0.0 ? label : label.cloneWith(haloWidthPixels: label.sizePixels * pointLabelHaloWidthFactor);
+    delayedText(label.text, Offset(center.x + offset.dx, center.y + offset.dy), sizePixels: label.sizePixels, rotation: label.rotation, textStyle: textStyle);
   }
 
   void line(Offset p1, Offset p2, {Color outline = const Color(0xFF000000), double lineWidthPixels = 1.0}) {

@@ -4,6 +4,7 @@ import 'dart:typed_data'; // Uint8List
 import 'dart:math' as math;
 import 'package:pdf/pdf.dart';
 // import 'package:pdf/src/pdf/obj/type1_font.dart';
+import 'package:flutter/services.dart' show rootBundle, ByteData;
 import 'package:vector_math/vector_math_64.dart';
 
 import 'color.dart';
@@ -13,6 +14,18 @@ import 'viewport.dart';
 // ----------------------------------------------------------------------
 
 String fontKey(LabelStyle style) => "${style.fontFamily} ${style.fontWeight} ${style.fontStyle}";
+
+// The PDF standard Type1 fonts (Helvetica/Times/Courier) returned by
+// CanvasPdf.getFont are Latin1-only: PdfFont.stringMetrics/drawString run the
+// text through Latin1Codec.encode, which throws on any code unit > 0xFF (e.g.
+// Chinese serum names). Strings that contain such characters are routed to a
+// bundled Unicode TrueType font instead — see CanvasPdf.getUnicodeFont.
+bool _isLatin1(String s) {
+  for (final u in s.codeUnits) {
+    if (u > 0xFF) return false;
+  }
+  return true;
+}
 
 class CanvasPdf extends CanvasRoot {
   CanvasPdf(Size canvasSize)
@@ -128,8 +141,30 @@ class CanvasPdf extends CanvasRoot {
     return font;
   }
 
+  // Bytes of the bundled Unicode TTF, loaded once and shared across documents.
+  // PdfTtfFont itself embeds into a specific PdfDocument, so the font object is
+  // per-instance (cached in _unicodeFont) but the source bytes are static.
+  static ByteData? _unicodeFontData;
+
+  // Preload the Unicode font asset. Must be awaited before constructing a
+  // CanvasPdf that may draw non-Latin1 text, because painting is synchronous
+  // while rootBundle.load is async. Safe to call repeatedly (loads once).
+  static Future<void> ensureFontsLoaded() async {
+    _unicodeFontData ??= await rootBundle.load("assets/fonts/NotoSansSC-Regular.ttf");
+  }
+
+  // A Unicode-capable font for this document. Falls back to Helvetica if the
+  // asset was not preloaded (then non-Latin1 text would still throw, but that
+  // is caught at the socket layer rather than hanging the protocol).
+  PdfFont getUnicodeFont() {
+    final data = _unicodeFontData;
+    if (data == null) return getFont("LabelFontFamily.helvetica FontWeight.w400 FontStyle.normal");
+    return _unicodeFont ??= PdfTtfFont(doc, data);
+  }
+
   final PdfDocument doc;
   final Map<String, PdfFont> _fonts;
+  PdfFont? _unicodeFont;
   late final PdfGraphics canvas;
 }
 
@@ -314,26 +349,45 @@ class _DrawOnPdf extends DrawOn {
   @override
   void text(String text, Offset origin, {double sizePixels = 20.0, double rotation = 0.0, LabelStyle textStyle = const LabelStyle()}) {
     final colorC = PdfColor.fromInt(textStyle.color.value);
+    // Latin1 text keeps the standard Type1 fonts (Latin layout unchanged);
+    // anything with non-Latin1 characters draws through the Unicode TTF.
+    final font = _isLatin1(text) ? _canvasPdf.getFont(fontKey(textStyle)) : _canvasPdf.getUnicodeFont();
+    final fontSize = sizePixels * pixelSize * fontScaleToMatchCanvas;
     _canvas
       ..saveContext()
       ..setTransform(Matrix4.translationValues(origin.dx, origin.dy, 0)
         ..rotateZ(rotation)
-        ..scale(1.0, -1.0))
+        ..scale(1.0, -1.0));
+    if (textStyle.haloWidthPixels > 0.0) {
+      final haloC = PdfColor.fromInt(textStyle.haloColor.value);
+      // isolate the stroke pass in its own save/restore: the text rendering mode (Tr) is part of the
+      // graphics state and persists, and the fill drawString below (default fill mode) won't reset it —
+      // without this the fill pass would also stroke, leaving white-outlined transparent glyphs.
+      _canvas
+        ..saveContext()
+        ..setGraphicState(PdfGraphicState(strokeOpacity: haloC.alpha))
+        ..setStrokeColor(haloC)
+        ..setLineWidth(textStyle.haloWidthPixels * pixelSize)
+        ..drawString(font, fontSize, text, 0.0, 0.0, mode: PdfTextRenderingMode.stroke) // halo under fill
+        ..restoreContext();
+    }
+    _canvas
       ..setGraphicState(PdfGraphicState(strokeOpacity: colorC.alpha, fillOpacity: colorC.alpha))
       ..setFillColor(colorC)
-      ..drawString(_canvasPdf.getFont(fontKey(textStyle)), sizePixels * pixelSize * fontScaleToMatchCanvas, text, 0.0, 0.0)
+      ..drawString(font, fontSize, text, 0.0, 0.0)
       ..restoreContext();
   }
 
   @override
   Size textSize(String text, {double sizePixels = 20.0, LabelStyle textStyle = const LabelStyle()}) {
-    final metrics = _canvasPdf.getFont(fontKey(textStyle)).stringMetrics(text);
+    final font = _isLatin1(text) ? _canvasPdf.getFont(fontKey(textStyle)) : _canvasPdf.getUnicodeFont();
+    final metrics = font.stringMetrics(text);
     const height = 1.0;         // instead of metrics.height (1.156) to match canvas font size
     return Size(metrics.width, height) * (sizePixels * pixelSize * fontScaleToMatchCanvas);
   }
 
   @override
-  void grid({double step = 1.0, Color color = const Color(0xFFCCCCCC), double lineWidthPixels = 1.0}) {
+  void grid({double step = 1.0, Color color = const Color(0xFFB0B0B0), double lineWidthPixels = 1.0}) {
     final colorc = PdfColor.fromInt(color.value);
     _canvas
       ..saveContext()

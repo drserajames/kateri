@@ -12,6 +12,8 @@ executables:
 dev_dependencies:
   lints: ^4.0.0
   flutter_lints: ^4.0.0
+  flutter_test:
+    sdk: flutter
 
 dependencies:
   flutter:
@@ -35,3 +37,8 @@ dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    # Unicode (CJK-capable) TrueType font used for PDF text that contains
+    # non-Latin1 characters (e.g. Chinese serum names). The PDF standard Type1
+    # fonts are Latin1-only; see lib/src/draw_on_pdf.dart getUnicodeFont().
+    - assets/fonts/NotoSansSC-Regular.ttf

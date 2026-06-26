@@ -3,12 +3,14 @@ import 'dart:math';
 import 'dart:typed_data'; // Uint8List
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart'; // PointerScrollEvent, kSecondaryButton
 import 'package:flutter/services.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:vector_math/vector_math_64.dart' as vec;
 import 'package:window_manager/window_manager.dart';
 import 'package:universal_platform/universal_platform.dart';
+import 'viewport.dart' as vp; // kateri's Viewport (Flutter also defines a Viewport widget)
 
 import 'app.dart'; // CommandLineData
 import 'map-viewer-data.dart';
@@ -159,6 +161,13 @@ class _AntigenicMapViewWidgetState extends State<AntigenicMapViewWidget> with Wi
     updateCallback(plotSpecIndex: viewer.data.addPlotSpecColorByAA(positions));
   }
 
+  void centreMap() {
+    viewer.data.centreMap();
+    aspectRatio = viewer.data.viewport?.aspectRatio() ?? 1.0;
+    if (UniversalPlatform.isMacOS) onWindowResized();
+    setState(() {});
+  }
+
   @override
   void showMessage(String text, {Color backgroundColor = Colors.red}) {
     debug("showMessage \"$text\"");
@@ -173,8 +182,8 @@ class _AntigenicMapViewWidgetState extends State<AntigenicMapViewWidget> with Wi
   }
 
   @override
-  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0}) async {
-    return antigenicMapPainter.viewer.exportPdf(canvasPdfWidth: canvasPdfWidth);
+  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false, double viewportSize = 0.0}) async {
+    return antigenicMapPainter.viewer.exportPdf(canvasPdfWidth: canvasPdfWidth, square: square, viewportSize: viewportSize);
   }
 
   // ----------------------------------------------------------------------
@@ -190,6 +199,8 @@ class _AntigenicMapViewWidgetState extends State<AntigenicMapViewWidget> with Wi
 
   @override
   void resetWindowSize() async {
+    viewer.data.resetView(); // F9 also resets interactive zoom/pan to fit
+    update();
     const defaultWindowWidth = 785.0;
     await windowManager.setSize(Size(defaultWindowWidth + menuSectionColumnWidth, defaultWindowWidth / aspectRatio + _nativeWindowTitleBarHeight), animate: true);
   }
@@ -247,7 +258,13 @@ class MouseInteractionWidget extends StatefulWidget {
 
 class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
   static final _lockKeys = Set<LogicalKeyboardKey>.unmodifiable(<LogicalKeyboardKey>[LogicalKeyboardKey.alt, LogicalKeyboardKey.altLeft, LogicalKeyboardKey.altRight]);
+  // Holding shift while dragging moves the nearest antigen/serum point, regardless of the menu "Move points" toggle.
+  static final _movePointKeys = Set<LogicalKeyboardKey>.unmodifiable(<LogicalKeyboardKey>[LogicalKeyboardKey.shift, LogicalKeyboardKey.shiftLeft, LogicalKeyboardKey.shiftRight]);
   RegionVertexRef? _draggedVertex;
+  int? _draggedPoint; // antigen/serum point being dragged (move-points mode), null if none
+  vec.Vector3? _selectStart; // rubber-band box-selection start (viewport coords), null if not selecting
+  Map<int, vec.Vector3>? _groupMoveOrigins; // original positions when dragging a multi-point selection together
+  vec.Vector3? _groupMoveStart; // mouse position where the group drag began
   SystemMouseCursor cursor = SystemMouseCursors.basic;
 
   @override
@@ -258,17 +275,99 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: cursor,
-      onHover: mouseMoved,
-      onExit: mouseExit,
-      child: GestureDetector(
-        child: widget.child,
-        onPanStart: dragStart,
-        onPanUpdate: dragUpdate,
-        onPanEnd: dragEnd,
+    return Listener(
+      onPointerSignal: _onPointerSignal, // mouse wheel -> zoom at cursor
+      onPointerDown: _onPointerDown, // right button -> start pan (mouse)
+      onPointerMove: _onPointerMove,
+      onPointerUp: _onPointerUp,
+      onPointerPanZoomStart: _onPanZoomStart, // trackpad two-finger gesture (pan + pinch zoom)
+      onPointerPanZoomUpdate: _onPanZoomUpdate,
+      onPointerPanZoomEnd: _onPanZoomEnd,
+      child: MouseRegion(
+        cursor: cursor,
+        onHover: mouseMoved,
+        onExit: mouseExit,
+        child: GestureDetector(
+          child: widget.child,
+          onPanStart: dragStart,
+          onPanUpdate: dragUpdate,
+          onPanEnd: dragEnd,
+          onDoubleTap: _resetView, // reset zoom/pan to fit
+        ),
       ),
     );
+  }
+
+  // ---- zoom / pan ----------------------------------------------------------
+
+  int? _panPointer; // pointer id of an in-progress right-button pan, null if none
+  Offset? _panLastPos;
+
+  void _onPointerSignal(PointerSignalEvent ev) {
+    // mouse wheel only; trackpad scrolling/pinching arrives via the pointer-pan-zoom path below
+    if (ev is! PointerScrollEvent || ev.kind == PointerDeviceKind.trackpad) return;
+    final viewer = widget.antigenicMapPainter.viewer;
+    if (viewer.data.chart == null || viewer.data.viewport == null) return;
+    final factor = ev.scrollDelta.dy < 0 ? 1.1 : (1.0 / 1.1); // scroll up = zoom in
+    viewer.data.zoomAt(mousePosition(ev.position), factor);
+    widget.updateCallback();
+  }
+
+  // Trackpad: two-finger drag pans, pinch zooms. Both come through one pan-zoom gesture stream.
+  double _panZoomScale = 1.0;
+
+  void _onPanZoomStart(PointerPanZoomStartEvent ev) {
+    _panZoomScale = 1.0;
+  }
+
+  void _onPanZoomUpdate(PointerPanZoomUpdateEvent ev) {
+    final viewer = widget.antigenicMapPainter.viewer;
+    if (viewer.data.chart == null || viewer.data.viewport == null || viewer.canvasSize.width == 0) return;
+    final viewport = viewer.data.effectiveViewport ?? viewer.data.viewport!;
+    final unitSize = viewer.canvasSize.width / viewport.width;
+    if (ev.panDelta != Offset.zero) {
+      viewer.data.panByWorld(ev.panDelta.dx / unitSize, ev.panDelta.dy / unitSize);
+    }
+    if (ev.scale != _panZoomScale && _panZoomScale > 0) {
+      viewer.data.zoomAt(mousePosition(ev.position), ev.scale / _panZoomScale);
+      _panZoomScale = ev.scale;
+    }
+    widget.updateCallback();
+  }
+
+  void _onPanZoomEnd(PointerPanZoomEndEvent ev) {
+    _panZoomScale = 1.0;
+  }
+
+  void _onPointerDown(PointerDownEvent ev) {
+    if (ev.buttons == kSecondaryButton) {
+      _panPointer = ev.pointer;
+      _panLastPos = ev.position;
+    }
+  }
+
+  void _onPointerMove(PointerMoveEvent ev) {
+    if (_panPointer != ev.pointer || _panLastPos == null) return;
+    final viewer = widget.antigenicMapPainter.viewer;
+    final viewport = viewer.data.effectiveViewport ?? viewer.data.viewport;
+    if (viewport == null || viewer.canvasSize.width == 0) return;
+    final unitSize = viewer.canvasSize.width / viewport.width;
+    final d = ev.position - _panLastPos!;
+    viewer.data.panByWorld(d.dx / unitSize, d.dy / unitSize);
+    _panLastPos = ev.position;
+    widget.updateCallback();
+  }
+
+  void _onPointerUp(PointerUpEvent ev) {
+    if (_panPointer == ev.pointer) {
+      _panPointer = null;
+      _panLastPos = null;
+    }
+  }
+
+  void _resetView() {
+    widget.antigenicMapPainter.viewer.data.resetView();
+    widget.updateCallback();
   }
 
   void _mouseCursorReset() => _setMouseCursor(SystemMouseCursors.basic);
@@ -297,6 +396,8 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
       final regionPathVertices = widget.antigenicMapPainter.viewer.regions.verticesByCoordinates(mousePos);
       if (regionPathVertices.isNotEmpty) {
         _mouseCursorDraggingRegionVertexPossible();
+      } else if ((widget.antigenicMapPainter.viewer.movePointsMode || _movePointModifierHeld()) && newlyHoveredPoints.isNotEmpty) {
+        _mouseCursorDraggingRegionVertexPossible();
       } else {
         _mouseCursorReset();
       }
@@ -310,43 +411,99 @@ class _MouseInteractionWidgetState extends State<MouseInteractionWidget> {
   }
 
   void dragStart(DragStartDetails details) {
+    final viewer = widget.antigenicMapPainter.viewer;
     final mousePos = mousePosition(details.globalPosition);
-    final regionPathVertices = widget.antigenicMapPainter.viewer.regions.verticesByCoordinates(mousePos);
+    // Region vertex editing takes priority and is always available.
+    final regionPathVertices = viewer.regions.verticesByCoordinates(mousePos);
     if (regionPathVertices.isNotEmpty) {
       _draggedVertex = regionPathVertices[0];
       _mouseCursorDraggingRegionVertex();
-      // print("DragStart $_draggedVertex");
+      return;
     }
+    // In move-points mode (menu toggle) or while shift is held, grab the topmost point under the cursor.
+    if (viewer.movePointsMode || _movePointModifierHeld()) {
+      final points = viewer.pointLookupByCoordinates.lookupByMouseCoordinates(mousePos);
+      if (points.isNotEmpty) {
+        _draggedPoint = points[0];
+        // If the grabbed point belongs to a multi-point selection, drag the whole selection together (by offset).
+        final selected = viewer.data.selectedPoints;
+        if (selected.contains(_draggedPoint) && selected.length > 1) {
+          final layout = viewer.data.projection!.transformedLayout();
+          _groupMoveStart = mousePos;
+          _groupMoveOrigins = {
+            for (final p in selected)
+              if (layout[p] != null) p: vec.Vector3.copy(layout[p]!)
+          };
+        }
+        _mouseCursorDraggingRegionVertex();
+        return;
+      }
+    }
+    // Otherwise start a rubber-band box selection.
+    _selectStart = mousePos;
+    viewer.selectionBoxStart = mousePos;
+    viewer.selectionBoxEnd = mousePos;
+    widget.updateCallback();
   }
 
   void dragUpdate(DragUpdateDetails details) {
+    final viewer = widget.antigenicMapPainter.viewer;
+    final mousePos = mousePosition(details.globalPosition);
     if (_draggedVertex != null) {
-      final mousePos = mousePosition(details.globalPosition);
-      widget.antigenicMapPainter.viewer.regions.vertexMove(_draggedVertex!, mousePos);
-      widget.updateCallback(); //
-      //setState(() {});
-      // print("dragUpdate $mousePos ${widget.antigenicMapPainter.viewer.regions.reportRegion(_draggedVertex!)}");
-      // print("DragUpdate $_draggedVertex $mousePos");
+      viewer.regions.vertexMove(_draggedVertex!, mousePos);
+      widget.updateCallback();
+    } else if (_draggedPoint != null) {
+      if (_groupMoveOrigins != null) {
+        final delta = mousePos - _groupMoveStart!;
+        _groupMoveOrigins!.forEach((p, origin) => viewer.data.movePoint(p, origin + delta));
+      } else {
+        viewer.data.movePoint(_draggedPoint!, mousePos);
+      }
+      widget.updateCallback();
+    } else if (_selectStart != null) {
+      viewer.selectionBoxEnd = mousePos;
+      widget.updateCallback();
     }
   }
 
   void dragEnd(DragEndDetails details) {
     // no position in details
+    final viewer = widget.antigenicMapPainter.viewer;
     if (_draggedVertex != null) {
-      print(widget.antigenicMapPainter.viewer.regions
-          .reportRegion(_draggedVertex!, vec.Vector3(widget.antigenicMapPainter.viewer.data.viewport!.left, widget.antigenicMapPainter.viewer.data.viewport!.top, 0.0)));
+      print(viewer.regions.reportRegion(_draggedVertex!, vec.Vector3(viewer.data.viewport!.left, viewer.data.viewport!.top, 0.0)));
       _draggedVertex = null;
       _mouseCursorReset();
+    } else if (_draggedPoint != null) {
+      final moved = viewer.data.movedPoints.toList()..sort();
+      info("[move] ${_groupMoveOrigins != null ? '${_groupMoveOrigins!.length} selected points' : 'point $_draggedPoint'} repositioned; moved points so far: $moved");
+      _draggedPoint = null;
+      _groupMoveOrigins = null;
+      _groupMoveStart = null;
+      _mouseCursorReset();
+      widget.updateCallback(); // refresh the menu's moved-points summary
+    } else if (_selectStart != null) {
+      viewer.data.selectPointsInBox(viewer.selectionBoxStart!, viewer.selectionBoxEnd!);
+      viewer.selectionBoxStart = null;
+      viewer.selectionBoxEnd = null;
+      _selectStart = null;
+      info("[select] ${viewer.data.selectedPoints.length} point(s) selected: ${viewer.data.selectedPoints.toList()..sort()}");
+      widget.updateCallback();
     }
   }
 
   vec.Vector3 mousePosition(Offset rawPosition) {
-    final unitSize = widget.antigenicMapPainter.viewer.canvasSize.width / widget.antigenicMapPainter.viewer.data.viewport!.width;
-    return vec.Vector3(rawPosition.dx / unitSize + widget.antigenicMapPainter.viewer.data.viewport!.left, rawPosition.dy / unitSize + widget.antigenicMapPainter.viewer.data.viewport!.top, 0.0);
+    final viewer = widget.antigenicMapPainter.viewer;
+    final viewport = viewer.data.effectiveViewport ?? viewer.data.viewport!;
+    final unitSize = viewer.canvasSize.width / viewport.width;
+    return vec.Vector3(rawPosition.dx / unitSize + viewport.left, rawPosition.dy / unitSize + viewport.top, 0.0);
   }
 
   bool isLocked() {
     return HardwareKeyboard.instance.logicalKeysPressed.intersection(_lockKeys).isNotEmpty;
+  }
+
+  bool _movePointModifierHeld() {
+    return HardwareKeyboard.instance.logicalKeysPressed.intersection(_movePointKeys).isNotEmpty;
   }
 }
 
@@ -374,6 +531,7 @@ class _MenuSectionColumnWidgetState extends State<MenuSectionColumnWidget> {
       _MenuSectionFile(widget.antigenicMapViewWidgetState.viewer.data),
       _MenuSectionColorByAA(this),
       _MenuSectionRegion(this),
+      _MenuSectionMovePoints(this),
       _MenuSectionStyles(widget.antigenicMapViewWidgetState, isExpanded: true),
     ];
     super.initState();
@@ -388,8 +546,11 @@ class _MenuSectionColumnWidgetState extends State<MenuSectionColumnWidget> {
           SingleChildScrollView(
             child: ExpansionPanelList(
               expansionCallback: (int index, bool isExpanded) {
+                // Flutter's ExpansionPanelList passes the *new* desired expansion state here (it already negates
+                // the current state internally), so use isExpanded directly — negating it again would make the
+                // panels never toggle.
                 setState(() {
-                  _sections[index].expand(!isExpanded);
+                  _sections[index].expand(isExpanded);
                 });
               },
               children: _sections.map<ExpansionPanel>((_MenuSection section) => section.build()).toList(),
@@ -673,6 +834,89 @@ class _MenuSectionRegion extends _MenuSection {
   }
 }
 
+class _MenuSectionMovePoints extends _MenuSection {
+  final _MenuSectionColumnWidgetState _menuSectionColumn;
+
+  _MenuSectionMovePoints(this._menuSectionColumn, {bool isExpanded = false}) : super(isExpanded);
+
+  AntigenicMapViewer get _viewer => _menuSectionColumn.widget.antigenicMapViewWidgetState.viewer;
+
+  @override
+  ExpansionPanel build() {
+    final moved = _viewer.data.movedPoints.toList()..sort();
+    final selected = _viewer.data.selectedPoints.toList()..sort();
+    return ExpansionPanel(
+      canTapOnHeader: true,
+      headerBuilder: (BuildContext context, bool isExpanded) => const ListTile(title: Text("Move points")),
+      body: Material(
+        color: const Color(0xFFF0F8FF),
+        shape: Border.all(color: const Color(0xFFA0C0FF)),
+        child: Column(
+          children: [
+            SwitchListTile(
+              title: const Text("Drag to move points"),
+              subtitle: const Text("When on, dragging an antigen/serum repositions it. (Or hold Shift while dragging.)"),
+              value: _viewer.movePointsMode,
+              onChanged: (bool value) {
+                _viewer.movePointsMode = value;
+                _menuSectionColumn.redraw();
+              },
+            ),
+            ListTile(
+              title: Text(selected.isEmpty ? "No points selected" : "Selected ${selected.length} point(s)"),
+              subtitle: const Text("Drag a box on empty space to select; drag a selected point to move them together."),
+              trailing: selected.isEmpty
+                  ? null
+                  : TextButton(
+                      child: const Text("Clear"),
+                      onPressed: () {
+                        _viewer.data.clearSelection();
+                        _menuSectionColumn.widget.antigenicMapViewWidgetState.update();
+                      },
+                    ),
+            ),
+            ListTile(
+              title: Text(moved.isEmpty ? "No points moved" : "Moved ${moved.length} point(s): ${moved.join(', ')}"),
+              trailing: moved.isEmpty
+                  ? null
+                  : TextButton(
+                      child: const Text("Reset"),
+                      onPressed: () {
+                        _viewer.data.resetMovedPoints();
+                        _menuSectionColumn.widget.antigenicMapViewWidgetState.update();
+                      },
+                    ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  // Asks the server to re-optimize (relax) the whole map; the relaxed map comes back as a new chart.
+                  onPressed: _viewer.data.connectedToServer ? () => _viewer.data.requestRelax() : null,
+                  child: Text(_viewer.data.connectedToServer ? "Relax map (re-optimize all points)" : "Relax — needs server connection"),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  // Reframe the map to fit, centred, and resize the window to match (also clears zoom/pan).
+                  onPressed: () => _menuSectionColumn.widget.antigenicMapViewWidgetState.centreMap(),
+                  child: const Text("Centre map"),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      isExpanded: _isExpanded,
+    );
+  }
+}
+
 // ----------------------------------------------------------------------
 
 class AntigenicMapViewWidgetMenu extends StatelessWidget {
@@ -735,11 +979,22 @@ class AntigenicMapViewer {
   final pointLookupByCoordinates = PointLookupByCoordinates();
   final regions = Regions();
 
+  /// When true, dragging on an antigen/serum point repositions it (the WHO-CC "adjust" step). Off by default so
+  /// ordinary interaction (hover, region editing) never moves points by accident. Toggled from the menu.
+  bool movePointsMode = false;
+
+  /// Corners of the in-progress rubber-band selection box (transformed/viewport coordinates), null when not
+  /// selecting. Painted as a translucent rectangle while the user drags.
+  vec.Vector3? selectionBoxStart;
+  vec.Vector3? selectionBoxEnd;
+
   AntigenicMapViewer(this.data);
 
   void paint(CanvasRoot canvas) {
     if (data.chart != null && data.viewport != null) {
-      canvas.draw(Offset.zero & canvas.size, data.viewport!, paintOn);
+      // Interactive zoom/pan applies on screen only; PDF export always renders the full (base) viewport.
+      final viewport = canvas is CanvasFlutter ? (data.effectiveViewport ?? data.viewport!) : data.viewport!;
+      canvas.draw(Offset.zero & canvas.size, viewport, paintOn);
       canvasSize = canvas.size;
     }
   }
@@ -759,11 +1014,37 @@ class AntigenicMapViewer {
       }
     });
     canvas.drawDelayed();
+    paintSelection(canvas, layout);
     regions.paint(canvas);
 
     paintLegend(canvas);
     paintTitle(canvas);
+    if (canvas.isInteractive) paintStress(canvas); // diagnostic overlay, interactive viewer only (not PDF)
     // pointLookupByCoordinates.report();
+  }
+
+  void paintStress(DrawOn canvas) {
+    if (data.chart == null || data.projection == null) return;
+    final stress = data.chart!.computeStress(data.projection!); // computed live so it tracks point drags
+    if (stress == null) return;
+    const fontSizePixels = 16.0;
+    final text = stress.toStringAsFixed(2);
+    final size = canvas.textSize(text, sizePixels: fontSizePixels);
+    final padding = fontSizePixels * canvas.pixelSize * 0.4;
+    canvas.text(text, Offset(canvas.viewport.left + padding, canvas.viewport.bottom - size.height - padding), sizePixels: fontSizePixels);
+  }
+
+  void paintSelection(DrawOn canvas, List<vec.Vector3?> layout) {
+    const highlightColor = Color(0xFFFF7F00); // orange ring around selected points
+    for (final pointNo in data.selectedPoints) {
+      if (pointNo < layout.length && layout[pointNo] != null) {
+        canvas.circle(center: layout[pointNo]!, radius: (data.currentPlotSpec[pointNo].sizePixels / 2 + 4) * canvas.pixelSize, outline: highlightColor, outlineWidthPixels: 2.5);
+      }
+    }
+    if (selectionBoxStart != null && selectionBoxEnd != null) {
+      final rect = Rect.fromPoints(Offset(selectionBoxStart!.x, selectionBoxStart!.y), Offset(selectionBoxEnd!.x, selectionBoxEnd!.y));
+      canvas.rectangle(rect: rect, fill: const Color(0x200080FF), outline: const Color(0xFF0080FF), outlineWidthPixels: 1.5);
+    }
   }
 
   // ----------------------------------------------------------------------
@@ -848,9 +1129,25 @@ class AntigenicMapViewer {
     }
   }
 
-  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0}) async {
+  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false, double viewportSize = 0.0}) async {
+    // Painting is synchronous but the Unicode font asset loads asynchronously,
+    // so it must be in place before any CanvasPdf is constructed below.
+    await CanvasPdf.ensureFontsLoaded();
     if (data.chart != null && data.viewport != null) {
-      final canvasPdf = CanvasPdf(Size(canvasPdfWidth, canvasPdfWidth / data.viewport!.width * data.viewport!.height))..paintBy(paint);
+      final curVp = data.viewport!;
+      // viewportSize > 0 (ae signature pages): render a square viewport of that fixed side
+      // (AD's sp.mapi zoom) centred on the auto-fit centre — matches AD's map framing. Otherwise
+      // `square` just expands the short side to the long side about the same centre.
+      final double side = viewportSize > 0.0 ? viewportSize : (square ? max(curVp.width, curVp.height) : 0.0);
+      if (side > 0.0 && (viewportSize > 0.0 || curVp.width != curVp.height)) {
+        final sq = vp.Viewport.originSizeList([curVp.centerX - side / 2, curVp.centerY - side / 2, side, side]);
+        final orig = data.viewport;
+        data.viewport = sq;
+        final canvasPdf = CanvasPdf(Size(canvasPdfWidth, canvasPdfWidth))..paintBy(paint);
+        data.viewport = orig;
+        return canvasPdf.bytes();
+      }
+      final canvasPdf = CanvasPdf(Size(canvasPdfWidth, canvasPdfWidth / curVp.width * curVp.height))..paintBy(paint);
       return canvasPdf.bytes();
     }
     return null;

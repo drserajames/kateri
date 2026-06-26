@@ -1,0 +1,50 @@
+#! /usr/bin/env python3
+# Live end-to-end check of the animated relax using the REAL ae side.
+#
+# Unlike py/drag-test (a standalone stand-in), this drives kateri with ae's actual
+# Communicator: on RLAX it runs ae.adjust.adjust_from_kateri, which relaxes capturing
+# the optimiser's intermediate layouts and streams them back as Kabsch-aligned LAYT
+# frames. So kateri animates the genuine optimiser trajectory.
+#
+#   PYTHONPATH=/Users/.../ae/build:/Users/.../ae/py python3.10 kateri/py/relax-anim-test
+#   # then in kateri: drag a point, press "Relax map" — watch it animate.
+
+import sys, os, asyncio
+from pathlib import Path
+
+AE = Path("/Users/sarahjames/AC/eu/ae")
+sys.path[:0] = [str(AE / "build"), str(AE / "py")]
+
+import ae_backend.chart_v3 as cv3
+import ae.utils.kateri as K
+
+KATERI = Path(__file__).parent.joinpath("../build/macos/Build/Products/Release/kateri.app/Contents/MacOS/kateri").resolve()
+CHART = Path(__file__).parent.joinpath("drag-test-chart.json")
+SOCK = "/tmp/k.sock"
+
+
+async def main():
+    if os.path.exists(SOCK):
+        os.unlink(SOCK)
+    comm = K.communicator                       # the real Communicator that connected()/handle_relax use
+    server = await asyncio.start_unix_server(comm.connected, SOCK)
+    print(f">>> server on {SOCK}", file=sys.stderr, flush=True)
+    await asyncio.create_subprocess_exec(str(KATERI), "--socket", SOCK)
+
+    async def send_initial_chart():
+        while not comm.is_connected():
+            await asyncio.sleep(0.1)
+        chart = cv3.chart_from_json(CHART.read_bytes())
+        comm.send_chart(chart)
+        await comm.drain()
+        print(f">>> sent chart {CHART.name}", file=sys.stderr, flush=True)
+
+    asyncio.create_task(send_initial_chart())
+    async with server:
+        await server.serve_forever()
+
+
+try:
+    asyncio.run(main())
+except (KeyboardInterrupt, RuntimeError):
+    pass

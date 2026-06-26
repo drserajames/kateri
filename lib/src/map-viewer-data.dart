@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:universal_platform/universal_platform.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:file_saver/file_saver.dart';
+import 'package:vector_math/vector_math_64.dart' show Vector3;
 
 import 'error.dart';
 import 'decompress.dart';
@@ -20,7 +21,7 @@ abstract class AntigenicMapViewerCallbacks {
   void updateCallback({int? plotSpecIndex});
   void showMessage(String text, {Color backgroundColor = Colors.red});
   void hideMessage();
-  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0});
+  Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false, double viewportSize = 0.0});
 }
 
 // ----------------------------------------------------------------------
@@ -30,7 +31,9 @@ class AntigenicMapViewerData {
   String? chartFilename; // for reloadChart()
   Chart? chart;
   Projection? projection;
-  vp.Viewport? viewport;
+  vp.Viewport? viewport; // base (fit-to-layout) viewport; PDF export and the view-reset use this
+  double viewZoom = 1.0; // interactive zoom factor (>1 zoomed in); 1.0 = fit
+  Offset viewPan = Offset.zero; // interactive pan of the view centre, in viewport coordinate units
   bool _chartBeingLoaded = false;
   Socket? _socket;
   late bool openExportedPdf;
@@ -39,17 +42,147 @@ class AntigenicMapViewerData {
   int currentPlotSpecIndex = -1;
   // final aaPerPos = <int, Map<String, int>>{};
 
+  /// Point (layout) indexes the user has dragged this session. Reported to the server (get_moved_points) so it
+  /// can pin them (Projection.set_unmovable) before relaxing. Antigens come first (0..nAg-1), then sera.
+  final Set<int> movedPoints = <int>{};
+
+  /// Point (layout) indexes currently selected via a rubber-band box. Dragging a selected point moves the whole
+  /// set together. Antigens come first (0..nAg-1), then sera.
+  final Set<int> selectedPoints = <int>{};
+
   AntigenicMapViewerData(this._callbacks);
 
   void setChart(Chart aChart) {
     chart = aChart;
     projection = chart!.projections[0];
     plotSpecs = chart!.plotSpecs(projection);
+    movedPoints.clear();
+    selectedPoints.clear();
+    resetView();
     _chartBeingLoaded = false;
     _callbacks.hideMessage();
     currentPlotSpecIndex = -1;
     _callbacks.updateCallback(plotSpecIndex: 0);
     // makeAaPerPos();
+  }
+
+  /// Move antigen/serum point [pointNo] to [newTransformedPos] (transformed/viewport coordinates) and record it
+  /// as moved. The underlying chart json is updated so exportToJson() / get_chart return the new coordinates.
+  void movePoint(int pointNo, Vector3 newTransformedPos) {
+    if (projection != null) {
+      projection!.moveTransformedPoint(pointNo, newTransformedPos);
+      movedPoints.add(pointNo);
+    }
+  }
+
+  /// Undo all point moves, restoring original coordinates.
+  void resetMovedPoints() {
+    projection?.resetMovedPoints();
+    movedPoints.clear();
+  }
+
+  /// Select every shown point whose (transformed) coordinate falls within the box with corners [c1] and [c2]
+  /// (both in transformed/viewport coordinates). Replaces the previous selection.
+  void selectPointsInBox(Vector3 c1, Vector3 c2) {
+    selectedPoints.clear();
+    if (projection == null || currentPlotSpecIndex < 0) return;
+    final layout = projection!.transformedLayout();
+    final minX = c1.x < c2.x ? c1.x : c2.x, maxX = c1.x < c2.x ? c2.x : c1.x;
+    final minY = c1.y < c2.y ? c1.y : c2.y, maxY = c1.y < c2.y ? c2.y : c1.y;
+    final spec = currentPlotSpec;
+    for (var i = 0; i < layout.length; ++i) {
+      final p = layout[i];
+      if (p != null && spec[i].shown && p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY) {
+        selectedPoints.add(i);
+      }
+    }
+  }
+
+  void clearSelection() {
+    selectedPoints.clear();
+  }
+
+  /// Apply one streamed intermediate optimiser layout (a LAYT frame received during an animated relax) and
+  /// repaint. [rawCoords] is a list of per-point [x, y(, z)] (or null for disconnected points) in the projection's
+  /// raw layout space. The viewport, plot style and selection are left untouched so the animation stays smooth;
+  /// the live stress readout updates automatically because it is computed from the displayed layout.
+  void applyLayoutFrame(List<dynamic> rawCoords, {bool commit = false}) {
+    if (projection == null) return;
+    final parsed = rawCoords.map<Vector3?>((c) {
+      if (c is List && c.length >= 2) {
+        return Vector3((c[0] as num).toDouble(), (c[1] as num).toDouble(), c.length >= 3 ? (c[2] as num).toDouble() : 0.0);
+      }
+      return null;
+    }).toList();
+    projection!.setDisplayLayout(parsed, commit: commit);
+    _callbacks.updateCallback();
+  }
+
+  // ----------------------------------------------------------------------
+  // Interactive zoom / pan. Only the drawing viewport is adjusted (uniform scale + offset), so the aspect ratio
+  // is preserved and the window never resizes. PDF export keeps using the base [viewport].
+
+  /// The viewport actually drawn on screen: the base [viewport] with the interactive zoom and pan applied.
+  vp.Viewport? get effectiveViewport {
+    final base = viewport;
+    if (base == null) return null;
+    if (viewZoom == 1.0 && viewPan == Offset.zero) return base;
+    final w = base.width / viewZoom, h = base.height / viewZoom;
+    final cx = base.centerX + viewPan.dx, cy = base.centerY + viewPan.dy;
+    return vp.Viewport.originSizeList([cx - w / 2, cy - h / 2, w, h]);
+  }
+
+  /// Zoom by [factor] (>1 zooms in) keeping [worldPos] (in current viewport coordinates) under the cursor.
+  void zoomAt(Vector3 worldPos, double factor) {
+    final base = viewport;
+    if (base == null) return;
+    final newZoom = (viewZoom * factor).clamp(0.2, 50.0);
+    final r = viewZoom / newZoom; // = newWidth / oldWidth
+    final cx = base.centerX + viewPan.dx, cy = base.centerY + viewPan.dy;
+    final ncx = worldPos.x - r * (worldPos.x - cx);
+    final ncy = worldPos.y - r * (worldPos.y - cy);
+    viewZoom = newZoom;
+    viewPan = Offset(ncx - base.centerX, ncy - base.centerY);
+  }
+
+  /// Pan the view by a delta expressed in viewport coordinate units (content follows the cursor).
+  void panByWorld(double dx, double dy) {
+    viewPan = Offset(viewPan.dx - dx, viewPan.dy - dy);
+  }
+
+  /// Reset zoom and pan back to fit-the-layout.
+  void resetView() {
+    viewZoom = 1.0;
+    viewPan = Offset.zero;
+  }
+
+  /// Reframe the base viewport to fit the current layout centred (e.g. after a relax left the map small and
+  /// off-centre), and clear any interactive zoom/pan. The window is resized to match by the widget.
+  void centreMap() {
+    if (projection == null) return;
+    final hull = vp.Viewport.hullLayout(projection!.transformedLayout());
+    final w = (hull.width + 1).ceilToDouble(), h = (hull.height + 1).ceilToDouble();
+    viewport = vp.Viewport.originSizeList([hull.centerX - w / 2, hull.centerY - h / 2, w, h]);
+    resetView();
+  }
+
+  /// True when driven by a server (ae) over the socket, i.e. relax can be requested.
+  bool get connectedToServer => _socket != null;
+
+  /// Ask the server (ae) to relax (re-optimize) the map. Sends an unsolicited RLAX notification over the socket —
+  /// a bare 4-byte code with no payload, exactly like the HELO/QUIT handshake frames (NOT the length-prefixed
+  /// CHRT/JSON/PDFB response framing). kateri itself never relaxes; the server is expected to react by pulling
+  /// the edited layout (get_chart) and relaxing the whole map from those positions — every point free to move,
+  /// nothing pinned — then pushing the relaxed chart back (CHRT), which kateri re-renders. The dragged points
+  /// merely provide better starting positions to escape local optima. (get_moved_points remains available as
+  /// informational reporting of which points the operator touched.)
+  void requestRelax() {
+    if (_socket == null) {
+      _callbacks.showMessage("Not connected to a server — relax runs on the ae side over the socket.");
+      return;
+    }
+    _socket!.write("RLAX");
+    info("[relax] requested; ${movedPoints.length} point(s) moved this session");
   }
 
   void setChartFromBytes(Uint8List bytes) {
@@ -60,6 +193,8 @@ class AntigenicMapViewerData {
     chart = null;
     projection = null;
     viewport = null;
+    movedPoints.clear();
+    selectedPoints.clear();
     _chartBeingLoaded = false;
     currentPlotSpecIndex = -1;
     _callbacks.updateCallback();
@@ -221,8 +356,8 @@ class AntigenicMapViewerData {
     }
   }
 
-  Future<Uint8List?> exportPdfToBytes({double width = 800.0}) async {
-    return _callbacks.exportPdf(canvasPdfWidth: width);
+  Future<Uint8List?> exportPdfToBytes({double width = 800.0, bool square = false, double viewportSize = 0.0}) async {
+    return _callbacks.exportPdf(canvasPdfWidth: width, square: square, viewportSize: viewportSize);
   }
 
   // ----------------------------------------------------------------------
