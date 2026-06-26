@@ -1130,6 +1130,9 @@ class AntigenicMapViewer {
   }
 
   Future<Uint8List?> exportPdf({double canvasPdfWidth = 800.0, bool square = false, double viewportSize = 0.0}) async {
+    // Painting is synchronous but the Unicode font asset loads asynchronously,
+    // so it must be in place before any CanvasPdf is constructed below.
+    await CanvasPdf.ensureFontsLoaded();
     if (data.chart != null && data.viewport != null) {
       final curVp = data.viewport!;
       // viewportSize > 0 (ae signature pages): render a square viewport of that fixed side
