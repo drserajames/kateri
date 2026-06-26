@@ -281,7 +281,17 @@ class _DrawOnCanvas extends DrawOn {
       ..save()
       ..translate(origin.dx, origin.dy)
       ..rotate(rotation);
-    _textPainter(text, sizePixels * pixelSize, textStyle).paint(canvas, Offset.zero);
+    final fontSize = sizePixels * pixelSize;
+    if (textStyle.haloWidthPixels > 0.0) {
+      final halo = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = textStyle.haloWidthPixels * pixelSize
+        ..strokeJoin = StrokeJoin.round
+        ..color = textStyle.haloColor
+        ..isAntiAlias = true;
+      _textPainter(text, fontSize, textStyle, foreground: halo).paint(canvas, Offset.zero); // stroke under fill
+    }
+    _textPainter(text, fontSize, textStyle).paint(canvas, Offset.zero);
     canvas.restore();
   }
 
@@ -293,10 +303,18 @@ class _DrawOnCanvas extends DrawOn {
     return Size(painter.width, painter.height) * (sizePixels * pixelSize / precisionFactor);
   }
 
-  TextPainter _textPainter(String text, double fontSize, LabelStyle textStyle) {
+  // foreground!=null draws a stroke pass (the halo); TextStyle forbids color+foreground together, so omit color then
+  TextPainter _textPainter(String text, double fontSize, LabelStyle textStyle, {Paint? foreground}) {
     return TextPainter(
         text: TextSpan(
-            text: text, style: TextStyle(color: textStyle.color, fontSize: fontSize, fontFamily: _labelFont(textStyle.fontFamily), fontStyle: textStyle.fontStyle, fontWeight: textStyle.fontWeight)),
+            text: text,
+            style: TextStyle(
+                color: foreground == null ? textStyle.color : null,
+                foreground: foreground,
+                fontSize: fontSize,
+                fontFamily: _labelFont(textStyle.fontFamily),
+                fontStyle: textStyle.fontStyle,
+                fontWeight: textStyle.fontWeight)),
         textDirection: TextDirection.ltr)
       ..layout();
   }

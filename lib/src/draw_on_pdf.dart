@@ -314,14 +314,30 @@ class _DrawOnPdf extends DrawOn {
   @override
   void text(String text, Offset origin, {double sizePixels = 20.0, double rotation = 0.0, LabelStyle textStyle = const LabelStyle()}) {
     final colorC = PdfColor.fromInt(textStyle.color.value);
+    final font = _canvasPdf.getFont(fontKey(textStyle));
+    final fontSize = sizePixels * pixelSize * fontScaleToMatchCanvas;
     _canvas
       ..saveContext()
       ..setTransform(Matrix4.translationValues(origin.dx, origin.dy, 0)
         ..rotateZ(rotation)
-        ..scale(1.0, -1.0))
+        ..scale(1.0, -1.0));
+    if (textStyle.haloWidthPixels > 0.0) {
+      final haloC = PdfColor.fromInt(textStyle.haloColor.value);
+      // isolate the stroke pass in its own save/restore: the text rendering mode (Tr) is part of the
+      // graphics state and persists, and the fill drawString below (default fill mode) won't reset it —
+      // without this the fill pass would also stroke, leaving white-outlined transparent glyphs.
+      _canvas
+        ..saveContext()
+        ..setGraphicState(PdfGraphicState(strokeOpacity: haloC.alpha))
+        ..setStrokeColor(haloC)
+        ..setLineWidth(textStyle.haloWidthPixels * pixelSize)
+        ..drawString(font, fontSize, text, 0.0, 0.0, mode: PdfTextRenderingMode.stroke) // halo under fill
+        ..restoreContext();
+    }
+    _canvas
       ..setGraphicState(PdfGraphicState(strokeOpacity: colorC.alpha, fillOpacity: colorC.alpha))
       ..setFillColor(colorC)
-      ..drawString(_canvasPdf.getFont(fontKey(textStyle)), sizePixels * pixelSize * fontScaleToMatchCanvas, text, 0.0, 0.0)
+      ..drawString(font, fontSize, text, 0.0, 0.0)
       ..restoreContext();
   }
 
