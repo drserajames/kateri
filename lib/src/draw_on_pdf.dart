@@ -13,7 +13,15 @@ import 'viewport.dart';
 
 // ----------------------------------------------------------------------
 
-String fontKey(LabelStyle style) => "${style.fontFamily} ${style.fontWeight} ${style.fontStyle}";
+// Canonicalise weight/style by VALUE, not by FontWeight/FontStyle.toString(): Flutter 3.44
+// changed those enums' toString (FontWeight.bold no longer prints "FontWeight.w700"), which
+// silently broke getFont's hardcoded string cases so all bold/italic text fell back to regular
+// Helvetica. Compare the values directly so the key always matches the switch below.
+String fontKey(LabelStyle style) {
+  final weight = (style.fontWeight == FontWeight.w700) ? "FontWeight.w700" : "FontWeight.w400";
+  final fstyle = (style.fontStyle == FontStyle.italic) ? "FontStyle.italic" : "FontStyle.normal";
+  return "${style.fontFamily} $weight $fstyle";
+}
 
 // The PDF standard Type1 fonts (Helvetica/Times/Courier) returned by
 // CanvasPdf.getFont are Latin1-only: PdfFont.stringMetrics/drawString run the
