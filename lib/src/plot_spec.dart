@@ -404,7 +404,9 @@ class PlotSpecSemantic extends PlotSpec with _DefaultDrawingOrder, _DefaultPoint
       if (serumNo < 0 || serumNo >= _chart.sera.length) throw DataError("invalid pointNo: $pointNo or serumNo $serumNo (AG: ${_chart.antigens.length} SR: ${_chart.sera.length})");
       final circleData = _chart.sera[serumNo].semantic["CI${mod['u']?.round() ?? 2}"];
       if (circleData == null) throw DataError("no serum circle data for fold ${mod['u']}");
-      final radius = ((mod["T"] ?? false) ? circleData["e"] : circleData["t"])?.toDouble();
+      // ae `T`=theoretical convention (chart-import.cc: T=theoretical(true)/empirical(false)).
+      // Serum semantic CI{fold} carries both radii: `e`=empirical, `t`=theoretical.
+      final radius = ((mod["T"] ?? false) ? circleData["t"] : circleData["e"])?.toDouble();
       final dash = (radius != null ? (mod["d"] ?? 0) : 100);
       return SerumCircle(
           radius: radius ?? mod["u"]?.toDouble() ?? 2.0,
